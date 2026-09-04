@@ -1,0 +1,20 @@
+[package]
+name = "exchangekit-gateway"
+description = "REST and WebSocket gateway for the exchangekit matching engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "exchangekit-gateway"
+path = "src/main.rs"
+
+[dependencies]
+exchangekit-engine = { path = "../engine" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tower-http = { version = "0.6", features = ["cors"] }

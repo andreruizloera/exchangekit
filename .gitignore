@@ -1,0 +1,11 @@
+/target
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+snapshot.json
+.DS_Store

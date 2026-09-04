@@ -1,10 +1,12 @@
 //! exchangekit-gateway: HTTP + WebSocket front door for the matching
 //! engine. Play money only; no custody or payment code exists here.
 
+mod game;
 mod handlers;
 mod seed;
 
 use std::env;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
 use axum::routing::{delete, get, post};
@@ -19,6 +21,12 @@ pub struct AppState {
     /// connected WebSocket clients receive.
     pub events: broadcast::Sender<String>,
     pub snapshot_path: Option<String>,
+    /// The current game round, if one is running or just finished.
+    pub game: RwLock<Option<game::GameSession>>,
+    /// Bumped on every round start; a tick task stops once it is stale.
+    pub game_gen: AtomicU64,
+    /// Monotonic round counter, used to name each round's throwaway market.
+    pub game_counter: AtomicU64,
 }
 
 pub fn now_ms() -> u64 {
@@ -66,6 +74,9 @@ async fn main() {
         exchange: RwLock::new(load_or_seed(snapshot_path.as_deref())),
         events,
         snapshot_path,
+        game: RwLock::new(None),
+        game_gen: AtomicU64::new(0),
+        game_counter: AtomicU64::new(0),
     });
 
     let app = Router::new()
@@ -80,6 +91,9 @@ async fn main() {
         .route("/api/accounts/{id}", get(handlers::get_account))
         .route("/api/accounts/{id}/positions", get(handlers::get_positions))
         .route("/api/accounts/{id}/orders", get(handlers::get_open_orders))
+        .route("/api/game", get(handlers::game_state))
+        .route("/api/game/start", post(handlers::game_start))
+        .route("/api/game/scorecard", get(handlers::game_scorecard))
         .route("/ws", get(handlers::ws_upgrade))
         .layer(CorsLayer::permissive())
         .with_state(state.clone());

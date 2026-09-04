@@ -6,9 +6,11 @@ interface Props {
   outcome: OutcomeId;
   onOutcomeChange: (o: OutcomeId) => void;
   onPriceClick: (price: number) => void;
+  /** Hide the YES/NO tabs when the view trades a single asset (the game). */
+  singleOutcome?: boolean;
 }
 
-export function OrderBook({ book, outcome, onOutcomeChange, onPriceClick }: Props) {
+export function OrderBook({ book, outcome, onOutcomeChange, onPriceClick, singleOutcome }: Props) {
   const asks = book ? book.asks.slice(0, 9).reverse() : []; // best ask at the bottom
   const bids = book ? book.bids.slice(0, 9) : []; // best bid at the top
   const maxQty = Math.max(1, ...asks.map((l) => l.quantity), ...bids.map((l) => l.quantity));
@@ -36,17 +38,19 @@ export function OrderBook({ book, outcome, onOutcomeChange, onPriceClick }: Prop
     <section className="panel book">
       <div className="panel-head">
         <span className="panel-title">Order book</span>
-        <div className="tabs">
-          {(["YES", "NO"] as const).map((o) => (
-            <button
-              key={o}
-              className={o === outcome ? `tab tab-${o.toLowerCase()} active` : "tab"}
-              onClick={() => onOutcomeChange(o)}
-            >
-              {o}
-            </button>
-          ))}
-        </div>
+        {!singleOutcome && (
+          <div className="tabs">
+            {(["YES", "NO"] as const).map((o) => (
+              <button
+                key={o}
+                className={o === outcome ? `tab tab-${o.toLowerCase()} active` : "tab"}
+                onClick={() => onOutcomeChange(o)}
+              >
+                {o}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <div className="book-cols">
         <span>price</span>

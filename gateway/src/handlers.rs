@@ -9,9 +9,18 @@ use exchangekit_engine::{EngineError, Exchange, Outcome, Side};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{now_ms, AppState};
+use exchangekit_engine::game::Tier;
+
+use crate::{game, now_ms, AppState};
 
 type Shared = State<Arc<AppState>>;
+
+/// Per-round game markets are named `game-N`. They are hidden from the public
+/// market list so the Python SDK and the demo only ever see the seeded
+/// markets, while the game UI drives them directly by id.
+fn is_game_market(id: &str) -> bool {
+    id.starts_with("game-")
+}
 
 // ---- error mapping -------------------------------------------------------
 
@@ -105,7 +114,11 @@ pub async fn health() -> Json<serde_json::Value> {
 
 pub async fn list_markets(State(state): Shared) -> Json<Vec<MarketSummary>> {
     let ex = state.exchange.read().expect("lock");
-    let ids: Vec<String> = ex.markets().map(|m| m.id.clone()).collect();
+    let ids: Vec<String> = ex
+        .markets()
+        .map(|m| m.id.clone())
+        .filter(|id| !is_game_market(id))
+        .collect();
     Json(ids.iter().filter_map(|id| summarize(&ex, id)).collect())
 }
 
@@ -274,6 +287,38 @@ pub async fn get_open_orders(
     Ok(Json(ex.open_orders(&id)))
 }
 
+// ---- game ----------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct StartGameBody {
+    tier: String,
+    duration_secs: Option<u64>,
+    /// Optional seed for a reproducible round; defaults to the clock.
+    seed: Option<u64>,
+}
+
+pub async fn game_start(
+    State(state): Shared,
+    Json(body): Json<StartGameBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let tier: Tier = Tier::parse(&body.tier)
+        .ok_or_else(|| bad_request(format!("unknown tier: {}", body.tier)))?;
+    let duration = body.duration_secs.unwrap_or(game::DEFAULT_DURATION);
+    let seed = body
+        .seed
+        .unwrap_or_else(|| now_ms() ^ 0x5DEE_CE66_D3A8_3C1B);
+    game::start(&state, tier, duration, seed);
+    Ok(Json(game::state_json(&state)))
+}
+
+pub async fn game_state(State(state): Shared) -> Json<serde_json::Value> {
+    Json(game::state_json(&state))
+}
+
+pub async fn game_scorecard(State(state): Shared) -> Json<serde_json::Value> {
+    Json(game::scorecard_json(&state))
+}
+
 // ---- websocket -----------------------------------------------------------
 
 pub async fn ws_upgrade(ws: WebSocketUpgrade, State(state): Shared) -> Response {
@@ -286,7 +331,11 @@ async fn ws_session(mut socket: WebSocket, state: Arc<AppState>) {
     // Initial snapshot so clients can render immediately.
     let hello = {
         let ex = state.exchange.read().expect("lock");
-        let ids: Vec<String> = ex.markets().map(|m| m.id.clone()).collect();
+        let ids: Vec<String> = ex
+            .markets()
+            .map(|m| m.id.clone())
+            .filter(|id| !is_game_market(id))
+            .collect();
         let markets: Vec<MarketSummary> = ids.iter().filter_map(|id| summarize(&ex, id)).collect();
         json!({ "type": "hello", "markets": markets }).to_string()
     };

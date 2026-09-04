@@ -2,14 +2,16 @@ import type { Trade } from "../types";
 
 interface Props {
   trades: Trade[]; // newest first, mixed outcomes
+  /** When set, trades this account was a party to are marked on the line. */
+  player?: string;
 }
 
 const W = 640;
 const H = 190;
 const PAD = 8;
 
-/** Line chart of YES trade prices for the selected market. */
-export function PriceChart({ trades }: Props) {
+/** Line chart of YES trade prices, with the player's own fills marked. */
+export function PriceChart({ trades, player }: Props) {
   const yes = trades
     .filter((t) => t.outcome === "YES")
     .slice()
@@ -73,13 +75,31 @@ export function PriceChart({ trades }: Props) {
           strokeWidth="1.8"
           vectorEffect="non-scaling-stroke"
         />
+        {player &&
+          yes.map((t, i) => {
+            if (t.buyer !== player && t.seller !== player) return null;
+            const bought = t.buyer === player;
+            return (
+              <circle
+                key={t.id}
+                cx={x(i)}
+                cy={y(t.price)}
+                r="3.2"
+                fill={bought ? "var(--yes)" : "var(--no)"}
+                stroke="var(--bg)"
+                strokeWidth="1"
+              >
+                <title>{`${bought ? "bought" : "sold"} ${t.quantity} @ ${t.price}c`}</title>
+              </circle>
+            );
+          })}
         {last && (
           <circle cx={W - PAD} cy={lastY} r="3" fill="var(--yes)">
-            <title>{`last YES trade ${last.price}c`}</title>
+            <title>{`last trade ${last.price}c`}</title>
           </circle>
         )}
       </svg>
-      {last && <div className="chart-caption">YES last {last.price}c</div>}
+      {last && <div className="chart-caption">last {last.price}c</div>}
     </div>
   );
 }

@@ -71,4 +71,57 @@ export type WsEvent =
   | { type: "hello"; markets: MarketSummary[] }
   | { type: "market"; market: MarketSummary }
   | { type: "book"; book: BookView }
-  | { type: "trade"; trade: Trade };
+  | { type: "trade"; trade: Trade }
+  | { type: "game_over" };
+
+// ---- game ----------------------------------------------------------------
+
+export type TierId = "easy" | "medium" | "hard";
+
+export interface Opponent {
+  name: string;
+  hint: string;
+  count: number;
+}
+
+export interface GameState {
+  status: "idle" | "running" | "ended";
+  tier: TierId;
+  market: string;
+  outcome: OutcomeId;
+  player: string;
+  started_ms: number;
+  duration_secs: number;
+  remaining_secs: number;
+  tick_ms: number;
+  starting_equity: number;
+  player_equity: number;
+  pnl: number;
+  opponents: Opponent[];
+}
+
+export interface Scorecard {
+  starting_equity: number;
+  final_equity: number;
+  pnl: number;
+  return_pct: number;
+  sharpe: number;
+  max_drawdown: number;
+  trades: number;
+  ticks: number;
+}
+
+export interface ScorecardResponse {
+  status: "idle" | "running" | "ended";
+  tier?: TierId;
+  fair_value?: number | null;
+  scorecard?: Scorecard;
+}
+
+export interface LeaderboardEntry {
+  tier: TierId;
+  return_pct: number;
+  pnl: number;
+  sharpe: number;
+  at: number;
+}

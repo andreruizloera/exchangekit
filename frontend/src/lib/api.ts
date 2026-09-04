@@ -1,12 +1,15 @@
 import type {
   Balance,
   BookView,
+  GameState,
   MarketSummary,
   Order,
   OutcomeId,
   PlaceResult,
   PositionRow,
+  ScorecardResponse,
   SideId,
+  TierId,
   Trade,
 } from "../types";
 
@@ -51,4 +54,12 @@ export const api = {
     request<Order>(`/api/orders/${id}?account=${encodeURIComponent(account)}`, {
       method: "DELETE",
     }),
+  gameStart: (tier: TierId, durationSecs: number) =>
+    request<GameState>("/api/game/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tier, duration_secs: durationSecs }),
+    }),
+  gameState: () => request<GameState>("/api/game"),
+  gameScorecard: () => request<ScorecardResponse>("/api/game/scorecard"),
 };

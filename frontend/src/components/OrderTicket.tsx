@@ -15,6 +15,8 @@ interface Props {
     price: number,
     quantity: number,
   ) => Promise<PlaceResult>;
+  /** Hide the YES/NO tabs and payout line when trading a single asset. */
+  singleOutcome?: boolean;
 }
 
 export function OrderTicket({
@@ -24,6 +26,7 @@ export function OrderTicket({
   onPriceChange,
   book,
   onSubmit,
+  singleOutcome,
 }: Props) {
   const [side, setSide] = useState<SideId>("BUY");
   const [quantity, setQuantity] = useState(10);
@@ -63,17 +66,19 @@ export function OrderTicket({
   return (
     <section className="panel ticket">
       <div className="panel-title">Order ticket</div>
-      <div className="tabs full">
-        {(["YES", "NO"] as const).map((o) => (
-          <button
-            key={o}
-            className={o === outcome ? `tab tab-${o.toLowerCase()} active` : "tab"}
-            onClick={() => onOutcomeChange(o)}
-          >
-            {o}
-          </button>
-        ))}
-      </div>
+      {!singleOutcome && (
+        <div className="tabs full">
+          {(["YES", "NO"] as const).map((o) => (
+            <button
+              key={o}
+              className={o === outcome ? `tab tab-${o.toLowerCase()} active` : "tab"}
+              onClick={() => onOutcomeChange(o)}
+            >
+              {o}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="tabs full">
         {(["BUY", "SELL"] as const).map((s) => (
           <button
@@ -122,10 +127,12 @@ export function OrderTicket({
           <span>{side === "BUY" ? "Max cost" : "Min proceeds"}</span>
           <span className="header-value">{formatCash(cost)}</span>
         </div>
-        <div>
-          <span>Payout if {outcome} wins</span>
-          <span className="header-value">{formatCash(quantity * 100)}</span>
-        </div>
+        {!singleOutcome && (
+          <div>
+            <span>Payout if {outcome} wins</span>
+            <span className="header-value">{formatCash(quantity * 100)}</span>
+          </div>
+        )}
       </div>
 
       <button
@@ -133,7 +140,9 @@ export function OrderTicket({
         disabled={!validPrice || !validQty || busy}
         onClick={() => void submit()}
       >
-        {busy ? "working" : `${side === "BUY" ? "Buy" : "Sell"} ${outcome} @ ${price}c`}
+        {busy
+          ? "working"
+          : `${side === "BUY" ? "Buy" : "Sell"} ${singleOutcome ? "" : `${outcome} `}@ ${price}c`}
       </button>
 
       {feedback && (

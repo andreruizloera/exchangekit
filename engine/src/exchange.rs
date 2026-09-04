@@ -417,6 +417,35 @@ impl Exchange {
         Ok(o.clone())
     }
 
+    /// Cancel every open order for an account, then reset its cash to
+    /// `balance` with no locked cash and no positions. Creates the account
+    /// if it does not exist. This exists so a game round can start each
+    /// player and bot from a clean slate without disturbing any other
+    /// account or the seeded markets; it is not part of normal trading.
+    pub fn reset_account(&mut self, id: &str, balance: Cash) {
+        let open: Vec<OrderId> = self
+            .orders
+            .values()
+            .filter(|o| o.account == id && o.status == OrderStatus::Open)
+            .map(|o| o.id)
+            .collect();
+        for oid in open {
+            let _ = self.cancel_order(id, oid);
+        }
+        let acct = self
+            .accounts
+            .entry(id.to_string())
+            .or_insert_with(|| Account {
+                id: id.to_string(),
+                balance: 0,
+                locked_cash: 0,
+                positions: HashMap::new(),
+            });
+        acct.balance = balance;
+        acct.locked_cash = 0;
+        acct.positions.clear();
+    }
+
     // ---- queries ---------------------------------------------------------
 
     pub fn markets(&self) -> impl Iterator<Item = &Market> {

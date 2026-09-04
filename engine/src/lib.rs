@@ -10,6 +10,7 @@
 mod book;
 mod error;
 mod exchange;
+pub mod game;
 mod types;
 
 pub use book::Book;

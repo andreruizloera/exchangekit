@@ -2,6 +2,22 @@
 
 Honest future work. None of this is implemented yet.
 
+## The game
+
+- Submit your own bot: a small strategy interface (in Rust, or over an RPC
+  boundary) so a player can drop a bot into the pit and watch it trade,
+  instead of only trading against the built-in five.
+- Multi-round campaigns: a sequence of rounds with carried scoring and a
+  rising difficulty curve, rather than one round at a time.
+- An online leaderboard behind a gateway endpoint, so scores are shared
+  rather than only kept in each browser's `localStorage`.
+- A round replay: because the fair value and every bot decision are seeded,
+  a finished round can be replayed tick for tick from its seed.
+- More strategies and per-tier tuning knobs exposed in the UI (spread,
+  volatility, jump frequency) so a round can be dialed in.
+- Marking inventory to a settlement at the buzzer (resolve the asset to its
+  final fair value) as an alternative to mark-to-mid scoring.
+
 ## Market structure
 
 - Complementary matching: cross a YES bid at p against a NO bid at

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::settlement::Resolution;
+
 /// Order identifier, unique per exchange instance.
 pub type OrderId = u64;
 /// Trade identifier, unique per exchange instance.
@@ -72,6 +74,9 @@ pub enum OrderStatus {
     Open,
     Filled,
     Cancelled,
+    /// Removed from the book because the market resolved underneath it.
+    /// Distinct from `Cancelled`, which is something an account chose.
+    Voided,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +86,16 @@ pub struct Market {
     pub description: String,
     /// Unix milliseconds.
     pub created_at: u64,
+    /// `None` while the market trades; `Some` once it has settled. Old
+    /// snapshots predate this field and load as an open market.
+    #[serde(default)]
+    pub resolution: Option<Resolution>,
+}
+
+impl Market {
+    pub fn is_resolved(&self) -> bool {
+        self.resolution.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

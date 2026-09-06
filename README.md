@@ -140,6 +140,34 @@ exchange is also usable on its own, with three seeded prediction markets, a
 seeded market maker, and the full order lifecycle. That is what the Python
 SDK and `./demo.sh` talk to.
 
+`./demo.sh` against a fresh gateway, parts 1 to 4:
+
+```
+== markets ==
+btc-100k      YES 63c  NO 37c  vol  105  Will Bitcoin close above $100,000 this year?
+fed-cut-dec   YES 44c  NO 56c  vol  157  Will the Fed cut rates at its December meeting?
+mars-2030     YES  8c  NO 92c  vol  209  Will humans land on Mars before 2030?
+
+== order book: btc-100k YES (top 3) ==
+  ask 66c  x 90
+  ask 65c  x 260
+  ask 64c  x 180
+  ----
+  bid 62c  x 180
+  bid 61c  x 260
+  bid 60c  x 120
+
+== demo buys 10 YES at the best ask ==
+  order 79: filled, filled 10/10
+  trade: 10 YES @ 64c (demo bought from marketmaker)
+
+== demo account after the trade ==
+  balance $10,451.30 (available $10,451.30)
+  position: 540 YES shares in btc-100k
+```
+
+The same thing through the SDK:
+
 ```python
 from exchangekit import Client   # pip install ./sdk/python
 
@@ -164,13 +192,84 @@ Core REST API (the seeded exchange):
 | POST | /api/orders | place a limit order |
 | DELETE | /api/orders/{id}?account=demo | cancel an open order |
 | GET | /api/accounts/{id} | play-money balance |
-| WS | /ws | hello snapshot, then trade, book, and market events |
+| POST | /api/markets/{id}/resolve | settle the market: `{outcome}` |
+| GET | /api/markets/{id}/settlement | the settlement report of a resolved market |
+| WS | /ws | hello snapshot, then trade, book, market, and resolution events |
 
 The Python SDK wraps the exchange with typed methods: `markets`, `market`,
 `book`, `trades`, `buy`, `sell`, `place_order`, `cancel`, `order`,
-`open_orders`, `positions`, `balance`. See [sdk/python](sdk/python). The
-per-round game markets are hidden from `GET /api/markets`, so the SDK and the
-demo only ever see the seeded exchange.
+`open_orders`, `positions`, `balance`, `resolve`, `settlement`. See
+[sdk/python](sdk/python). The per-round game markets are hidden from
+`GET /api/markets`, so the SDK and the demo only ever see the seeded
+exchange.
+
+## Settling a market
+
+That "settles at 0 or 100 cents" is the whole point of a binary contract, so
+the exchange can do it. Resolving a market pays 100 cents for every share of
+the winning outcome, pays nothing for the other side, voids every resting
+order, and closes the market for good. This is part 5 of `./demo.sh`, run
+against a fresh gateway:
+
+```
+== mars-2030 before resolution ==
+  status:     open
+  collateral: $101,500.00 backing its outstanding shares
+  demo holds: 556 YES, 500 NO
+
+== resolve mars-2030 to NO ==
+  winner:        NO
+  paid out:      $101,500.00 to 4 account(s)
+  shares:        101,500 winning, 101,500 losing
+  collateral:    $101,500.00 held by the market
+  unbacked cash: $0.00
+  voided:        18 resting orders, releasing $1,624.56 and 3,634 shares of escrow
+    alice           546 winning x $1.00 = $546.00
+    bob             500 winning x $1.00 = $500.00
+    demo            500 winning x $1.00 = $500.00
+    marketmaker  99,954 winning x $1.00 = $99,954.00
+
+== the market is closed ==
+  book: 0 price levels left on either side
+  new order:     400 market mars-2030 has resolved and no longer trades
+  resolve again: 409 market mars-2030 has already resolved
+```
+
+Four things in that output are decisions worth naming.
+
+**Orders are voided before anything is paid.** A resting sell has shares
+locked against it and a resting buy has cash locked against it. Clearing
+positions first would leave the escrow pointing at a position that no longer
+exists, and the account would carry a lock it could never release on a market
+that no longer trades. Releasing first means every share the payout sees is
+one its owner holds free and clear, including the 3,634 that were sitting in
+sell orders.
+
+**A voided order is not a cancelled one.** Its status is `voided`: the market
+resolved underneath it, which is not something its owner chose.
+
+**Unbacked cash is reported, not hidden.** Trading conserves cash, because a
+buyer's cents become a seller's cents. Settlement is different: it pays
+against shares, and a share only funds itself if it was minted as a YES/NO
+pair against 100 cents of collateral. The seeded exchange mints every share
+that way, which is why the payout above exactly matches the collateral and
+`unbacked cash` reads `$0.00`. The engine also has `grant_shares`, which
+creates shares for free (the game hands out one-sided inventory that way),
+and settling those creates cash out of nothing. The engine does not forbid
+it. It refuses to hide it: the shortfall is computed on every settlement and
+printed with a name.
+
+**Resolution happens once.** A second call is a 409, not a second payout.
+
+```python
+settlement = client.resolve("mars-2030", "NO")
+settlement.total_paid, settlement.unbacked_cash   # (10150000, 0)
+client.market("mars-2030").resolved_outcome       # 'NO'
+```
+
+There is no authentication anywhere in the gateway, so anyone who can reach
+it can settle a market. That is acceptable in a local simulator running on
+your own machine and would not be acceptable anywhere else.
 
 ## Architecture
 
@@ -214,14 +313,21 @@ cargo test                        # engine + game + gateway
 cd frontend && npm test           # scoring and formatting unit tests
 cd sdk/python && .venv/bin/pytest # SDK unit tests; integration tests
                                   # run when a gateway is up, skip otherwise
+./demo.sh                         # needs a gateway; fails if any line it
+                                  # prints has drifted from this README
 ```
 
 Engine tests cover the matcher (price and time priority, partial and full
-fills, marketable limits, cancels and escrow, conservation, snapshots) and
-the game logic: the seeded PRNG, the fair-value process staying in bounds,
-each bot strategy's core decision from a fixed seed, the Sharpe and drawdown
-math against known equity curves, and tier composition. Frontend tests cover
-the scorecard grade thresholds and the number formatting.
+fills, marketable limits, cancels and escrow, conservation, snapshots),
+settlement (payout arithmetic, voiding and escrow release on both books,
+the closed market, resolving twice, cash conservation across a fully paired
+market, and unbacked cash when shares were granted), and the game logic: the
+seeded PRNG, the fair-value process staying in bounds, each bot strategy's
+core decision from a fixed seed, the Sharpe and drawdown math against known
+equity curves, and tier composition. Frontend tests cover the scorecard grade
+thresholds and the number formatting. CI runs the demo and the SDK
+integration tests against a real gateway, so the output pasted above cannot
+drift from the tool without the build going red.
 
 ## Limitations
 
@@ -229,10 +335,22 @@ the scorecard grade thresholds and the number formatting.
   each round with an inventory to work down. Managing that inventory is part
   of the game.
 - YES and NO books are independent; the game trades a single side.
+- A market resolves to YES or NO and nothing else. There is no void or refund
+  outcome, because the engine records what a share is worth at settlement and
+  not what anyone paid for it, so it has nothing to refund against.
+- Settling a granted share creates cash. `grant_shares` mints shares with no
+  collateral, so a market resolved while any are outstanding pays out more
+  than it holds. The settlement reports that as `unbacked_cash` and the
+  seeded exchange never does it, but the engine will not stop you.
+- Game rounds do not settle. A round is scored by marking inventory to the
+  book at the buzzer, and `POST /api/markets/game-N/resolve` is refused,
+  because settling a round's market out from under the tick loop would
+  rewrite the player's equity mid-game.
 - State is in memory. The core exchange can restore from a JSON snapshot
   (`EXCHANGEKIT_SNAPSHOT`), but game rounds are ephemeral by design.
-- No authentication: any client can act as any account. This is a local
-  simulator, not a service.
+- No authentication: any client can act as any account, and that now includes
+  resolving a market and paying out every holder. This is a local simulator,
+  not a service.
 
 See [ROADMAP.md](ROADMAP.md) for planned work.
 

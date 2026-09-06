@@ -16,16 +16,26 @@ Honest future work. None of this is implemented yet.
 - More strategies and per-tier tuning knobs exposed in the UI (spread,
   volatility, jump frequency) so a round can be dialed in.
 - Marking inventory to a settlement at the buzzer (resolve the asset to its
-  final fair value) as an alternative to mark-to-mid scoring.
+  final fair value) as an alternative to mark-to-mid scoring. The engine
+  can settle a market now; what is missing is wiring it into the round and
+  deciding what a mid-round resolution would do to the equity curve.
 
 ## Market structure
 
 - Complementary matching: cross a YES bid at p against a NO bid at
   100 - p by minting a share pair, and burn pairs on the ask side.
   Today YES and NO trade in independent books, and demo liquidity comes
-  from a seeded market-maker account.
-- Market resolution: an admin endpoint that settles a market to YES or
-  NO, pays out 100 cents per winning share, and voids resting orders.
+  from a seeded market-maker account. `mint_pair` already exists and is
+  what the seed uses; this is the matching half of it.
+- Redeeming a pair: burn one YES and one NO back into 100 cents of cash
+  before the market resolves. Today collateral only ever flows in, and
+  out again at settlement.
+- Voiding a market instead of resolving it, refunding what each holder
+  paid. This needs a cost basis per position, which the engine does not
+  record, so it is a real piece of work and not a third enum variant.
+- Settling a game round to the revealed fair value at the buzzer, as an
+  alternative to mark-to-mid scoring. Rounds are deliberately excluded
+  from `POST /api/markets/{id}/resolve` today.
 - Market creation via the API and UI (today markets are seeded at boot).
 - Short selling backed by cash collateral, so selling does not require
   an existing position.

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::book::Book;
 use crate::error::EngineError;
+use crate::settlement::{compute_payouts, unbacked, Holding, Resolution, Settlement, SHARE_PAYOUT};
 use crate::types::{
     BookView, Cash, Market, Order, OrderId, OrderStatus, Outcome, PlaceResult, Price, Qty, Side,
     Trade, TradeId,
@@ -95,6 +96,15 @@ pub struct Exchange {
     orders: HashMap<OrderId, Order>,
     accounts: BTreeMap<String, Account>,
     trades: HashMap<String, Vec<Trade>>,
+    /// Cents backing each market's outstanding shares. Minting a YES/NO
+    /// pair adds 100 cents here; resolution pays out of it. Absent from
+    /// snapshots taken before settlement existed, which load as zero.
+    #[serde(default)]
+    collateral: BTreeMap<String, Cash>,
+    /// The settlement report of every resolved market, kept so a caller
+    /// can read what happened long after the fact.
+    #[serde(default)]
+    settlements: BTreeMap<String, Settlement>,
     next_order_id: OrderId,
     next_trade_id: TradeId,
     next_seq: u64,
@@ -140,6 +150,7 @@ impl Exchange {
                 question: question.to_string(),
                 description: description.to_string(),
                 created_at: now_ms,
+                resolution: None,
             },
         );
         self.books.insert(id.to_string(), MarketBooks::default());
@@ -147,8 +158,57 @@ impl Exchange {
         Ok(())
     }
 
-    /// Mint shares into an account. Used only for seeding demo liquidity;
-    /// a real listing flow would mint YES/NO pairs against collateral.
+    /// An open market, or the error explaining why it is not usable.
+    fn require_open(&self, market: &str) -> Result<(), EngineError> {
+        match self.markets.get(market) {
+            None => Err(EngineError::UnknownMarket(market.to_string())),
+            Some(m) if m.is_resolved() => Err(EngineError::MarketResolved(market.to_string())),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// Mint `qty` YES/NO pairs into an account against collateral: the
+    /// account pays [`SHARE_PAYOUT`] cents per pair and receives one share
+    /// of each outcome, and the cents go into the market's collateral pool.
+    ///
+    /// This is the funded way to create shares. Exactly one share of each
+    /// pair wins at settlement and is paid 100 cents, so the pool always
+    /// holds what the market will owe. Pairs are the reason a settlement
+    /// can report zero unbacked cash.
+    pub fn mint_pair(&mut self, account: &str, market: &str, qty: Qty) -> Result<(), EngineError> {
+        self.require_open(market)?;
+        if qty == 0 {
+            return Err(EngineError::InvalidQuantity);
+        }
+        let cost = SHARE_PAYOUT * qty as Cash;
+        let acct = self
+            .accounts
+            .get_mut(account)
+            .ok_or_else(|| EngineError::UnknownAccount(account.to_string()))?;
+        let available = acct.available_cash();
+        if cost > available {
+            return Err(EngineError::InsufficientBalance {
+                need: cost,
+                available,
+            });
+        }
+        acct.balance -= cost;
+        let pos = acct.positions.entry(market.to_string()).or_default();
+        pos.yes.quantity += qty as i64;
+        pos.no.quantity += qty as i64;
+        *self.collateral.entry(market.to_string()).or_insert(0) += cost;
+        Ok(())
+    }
+
+    /// Mint shares into an account for free, with no collateral behind
+    /// them. Used for seeding demo liquidity and for the one-sided
+    /// inventory a game round hands out.
+    ///
+    /// Granted shares are real shares: they trade and they settle. What
+    /// they do not carry is funding, so settling them creates cash that no
+    /// collateral stood behind. [`Exchange::resolve_market`] reports that
+    /// as `unbacked_cash` rather than letting it pass silently. Use
+    /// [`Exchange::mint_pair`] where the money has to add up.
     pub fn grant_shares(
         &mut self,
         account: &str,
@@ -156,9 +216,7 @@ impl Exchange {
         outcome: Outcome,
         qty: Qty,
     ) -> Result<(), EngineError> {
-        if !self.markets.contains_key(market) {
-            return Err(EngineError::UnknownMarket(market.to_string()));
-        }
+        self.require_open(market)?;
         let acct = self
             .accounts
             .get_mut(account)
@@ -193,9 +251,7 @@ impl Exchange {
         if quantity == 0 {
             return Err(EngineError::InvalidQuantity);
         }
-        if !self.markets.contains_key(market) {
-            return Err(EngineError::UnknownMarket(market.to_string()));
-        }
+        self.require_open(market)?;
 
         // Escrow: buys lock cash at the limit price, sells lock shares.
         {
@@ -422,6 +478,12 @@ impl Exchange {
     /// if it does not exist. This exists so a game round can start each
     /// player and bot from a clean slate without disturbing any other
     /// account or the seeded markets; it is not part of normal trading.
+    ///
+    /// It destroys shares without touching any collateral pool, so calling
+    /// it on an account holding shares of a collateralized market would
+    /// leave that market over-collateralized. The game only ever resets its
+    /// own player and bot accounts, which hold nothing but the one-sided
+    /// inventory the round granted them.
     pub fn reset_account(&mut self, id: &str, balance: Cash) {
         let open: Vec<OrderId> = self
             .orders
@@ -446,7 +508,166 @@ impl Exchange {
         acct.positions.clear();
     }
 
+    // ---- settlement ------------------------------------------------------
+
+    /// Settle a market to `winner`. Every share of the winning outcome pays
+    /// [`SHARE_PAYOUT`] cents, every share of the other pays nothing, every
+    /// resting order is voided, and the market stops trading for good.
+    ///
+    /// Orders are voided BEFORE anything is paid, and that order matters. A
+    /// resting sell has shares locked against it and a resting buy has cash
+    /// locked against it; clearing positions first would leave that escrow
+    /// pointing at a position that no longer exists, and the account would
+    /// carry a lock it could never release on a market that no longer
+    /// trades. Releasing the escrow first means every share the payout sees
+    /// is a share its owner actually holds free and clear.
+    ///
+    /// Resolution is not reversible and cannot be repeated: a second call
+    /// returns [`EngineError::MarketAlreadyResolved`] rather than paying
+    /// twice.
+    pub fn resolve_market(
+        &mut self,
+        market: &str,
+        winner: Outcome,
+        now_ms: u64,
+    ) -> Result<Settlement, EngineError> {
+        match self.markets.get(market) {
+            None => return Err(EngineError::UnknownMarket(market.to_string())),
+            Some(m) if m.is_resolved() => {
+                return Err(EngineError::MarketAlreadyResolved(market.to_string()))
+            }
+            Some(_) => {}
+        }
+
+        // 1. Void every resting order in both books and release its escrow.
+        let mut open: Vec<OrderId> = self
+            .orders
+            .values()
+            .filter(|o| o.market == market && o.status == OrderStatus::Open)
+            .map(|o| o.id)
+            .collect();
+        open.sort_unstable();
+
+        let mut orders_voided = 0usize;
+        let mut cash_released: Cash = 0;
+        let mut shares_released: Qty = 0;
+        for oid in open {
+            let order = self.orders[&oid].clone();
+            let remaining = order.remaining();
+            let removed = self
+                .books
+                .get_mut(market)
+                .expect("market book")
+                .get_mut(order.outcome)
+                .remove(order.side == Side::Buy, order.price, oid);
+            debug_assert!(removed, "open order must be resting in the book");
+
+            let acct = self
+                .accounts
+                .get_mut(&order.account)
+                .expect("order account exists");
+            match order.side {
+                Side::Buy => {
+                    let release = order.price as Cash * remaining as Cash;
+                    acct.locked_cash -= release;
+                    cash_released += release;
+                }
+                Side::Sell => {
+                    acct.positions
+                        .entry(market.to_string())
+                        .or_default()
+                        .get_mut(order.outcome)
+                        .locked -= remaining as i64;
+                    shares_released += remaining;
+                }
+            }
+            self.orders.get_mut(&oid).expect("order exists").status = OrderStatus::Voided;
+            orders_voided += 1;
+        }
+
+        // 2. Price every remaining holding. `accounts` is a BTreeMap, so
+        //    the report comes out in account-id order without a sort.
+        let holdings: Vec<Holding> = self
+            .accounts
+            .values()
+            .filter_map(|a| {
+                a.positions.get(market).map(|mp| Holding {
+                    account: a.id.clone(),
+                    yes: mp.yes.quantity.max(0) as Qty,
+                    no: mp.no.quantity.max(0) as Qty,
+                })
+            })
+            .collect();
+        let payouts = compute_payouts(&holdings, winner);
+        let total_paid: Cash = payouts.iter().map(|p| p.paid).sum();
+        let winning_shares: Qty = payouts.iter().map(|p| p.winning_shares).sum();
+        let losing_shares: Qty = payouts.iter().map(|p| p.losing_shares).sum();
+
+        // 3. Pay, then clear every position in this market. Both outcomes
+        //    go, winning and losing alike: a settled share is spent.
+        for payout in &payouts {
+            self.accounts
+                .get_mut(&payout.account)
+                .expect("paid account exists")
+                .balance += payout.paid;
+        }
+        for acct in self.accounts.values_mut() {
+            if let Some(pos) = acct.positions.remove(market) {
+                debug_assert!(
+                    pos.yes.locked == 0 && pos.no.locked == 0,
+                    "voiding must release every share lock before payout"
+                );
+            }
+        }
+
+        // 4. Draw on the market's collateral and name what was not funded.
+        let collateral = self.collateral.remove(market).unwrap_or(0);
+        let unbacked_cash = unbacked(total_paid, collateral);
+
+        self.markets
+            .get_mut(market)
+            .expect("market exists")
+            .resolution = Some(Resolution {
+            outcome: winner,
+            resolved_at: now_ms,
+        });
+
+        let settlement = Settlement {
+            market: market.to_string(),
+            outcome: winner,
+            resolved_at: now_ms,
+            payouts,
+            total_paid,
+            winning_shares,
+            losing_shares,
+            orders_voided,
+            cash_released,
+            shares_released,
+            collateral,
+            unbacked_cash,
+        };
+        self.settlements
+            .insert(market.to_string(), settlement.clone());
+        Ok(settlement)
+    }
+
     // ---- queries ---------------------------------------------------------
+
+    /// How a market settled, or `None` while it is still trading.
+    pub fn resolution(&self, market: &str) -> Option<Resolution> {
+        self.markets.get(market).and_then(|m| m.resolution)
+    }
+
+    /// The full settlement report of a resolved market.
+    pub fn settlement(&self, market: &str) -> Option<&Settlement> {
+        self.settlements.get(market)
+    }
+
+    /// Cents currently backing a market's outstanding shares. Emptied when
+    /// the market resolves.
+    pub fn collateral(&self, market: &str) -> Cash {
+        self.collateral.get(market).copied().unwrap_or(0)
+    }
 
     pub fn markets(&self) -> impl Iterator<Item = &Market> {
         self.markets.values()

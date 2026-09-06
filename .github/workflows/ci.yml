@@ -50,5 +50,40 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: ruff format --check src tests
       - run: ruff check src tests
-      # Integration tests self-skip: no gateway runs in this job.
+      # Integration tests self-skip: no gateway runs in this job. The demo
+      # job below runs them for real against a live gateway.
       - run: pytest -q
+
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[dev]'
+        working-directory: sdk/python
+      - run: cargo build -p exchangekit-gateway
+      - name: SDK integration tests and demo, each against a fresh gateway
+        run: |
+          # Two instances, not one. Both suites trade the seeded exchange,
+          # and the demo checks numbers that only hold on a gateway nothing
+          # else has touched. Sharing one would make each suite depend on
+          # the order the other ran in.
+          PORT=8080 ./target/debug/exchangekit-gateway &
+          DEMO_GW=$!
+          PORT=8081 ./target/debug/exchangekit-gateway &
+          SDK_GW=$!
+          trap 'kill $DEMO_GW $SDK_GW' EXIT
+          for port in 8080 8081; do
+            for _ in $(seq 1 60); do
+              curl -fsS "http://localhost:$port/api/health" >/dev/null 2>&1 && break
+              sleep 1
+            done
+            curl -fsS "http://localhost:$port/api/health"
+          done
+          (cd sdk/python && EXCHANGEKIT_URL=http://localhost:8081 pytest -q tests/test_integration.py)
+          # demo.sh exits nonzero if any line the README pastes is missing.
+          ./demo.sh

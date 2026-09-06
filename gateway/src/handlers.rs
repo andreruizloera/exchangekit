@@ -38,6 +38,10 @@ impl From<EngineError> for ApiError {
             EngineError::UnknownMarket(_)
             | EngineError::UnknownAccount(_)
             | EngineError::UnknownOrder(_) => StatusCode::NOT_FOUND,
+            // Resolving twice is a conflict with the market's state, not a
+            // malformed request; the caller's second try is well formed and
+            // simply lost the race.
+            EngineError::MarketAlreadyResolved(_) => StatusCode::CONFLICT,
             _ => StatusCode::BAD_REQUEST,
         };
         ApiError(status, e.to_string())
@@ -60,14 +64,25 @@ pub struct MarketSummary {
     question: String,
     description: String,
     created_at: u64,
-    /// Price estimates in cents (last trade, else book midpoint).
+    /// Price estimates in cents (last trade, else book midpoint). These
+    /// stay at the last traded price after resolution: they describe the
+    /// tape, not the settlement. `resolved_outcome` is the settled answer.
     yes_price: Option<u32>,
     no_price: Option<u32>,
     volume: u64,
+    /// "open" while the market trades, "resolved" once it has settled.
+    status: &'static str,
+    /// The winning outcome, or null while the market is open.
+    resolved_outcome: Option<Outcome>,
+    resolved_at: Option<u64>,
+    /// Cents backing the market's outstanding shares. Zero after
+    /// resolution, because the pool was paid out.
+    collateral: i64,
 }
 
 fn summarize(ex: &Exchange, id: &str) -> Option<MarketSummary> {
     let m = ex.market(id)?;
+    let resolution = m.resolution;
     Some(MarketSummary {
         id: m.id.clone(),
         question: m.question.clone(),
@@ -76,6 +91,14 @@ fn summarize(ex: &Exchange, id: &str) -> Option<MarketSummary> {
         yes_price: ex.price_estimate(id, Outcome::Yes),
         no_price: ex.price_estimate(id, Outcome::No),
         volume: ex.volume(id),
+        status: if resolution.is_some() {
+            "resolved"
+        } else {
+            "open"
+        },
+        resolved_outcome: resolution.map(|r| r.outcome),
+        resolved_at: resolution.map(|r| r.resolved_at),
+        collateral: ex.collateral(id),
     })
 }
 
@@ -166,6 +189,61 @@ pub async fn get_trades(
 ) -> Result<Json<Vec<exchangekit_engine::Trade>>, ApiError> {
     let ex = state.exchange.read().expect("lock");
     Ok(Json(ex.recent_trades(&id, q.limit.unwrap_or(50).min(500))?))
+}
+
+// ---- settlement ----------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ResolveBody {
+    /// The winning outcome, "YES" or "NO".
+    outcome: String,
+}
+
+/// Settle a market and pay out. This is an admin operation: the gateway has
+/// no authentication (see the README), so anyone who can reach it can
+/// resolve a market. That is acceptable in a local simulator and would not
+/// be anywhere else.
+///
+/// Game markets are refused. A round's market is driven by the tick loop
+/// and scored by marking inventory to the book, so settling it out from
+/// under a running round would rewrite the player's equity mid-game.
+pub async fn resolve_market(
+    State(state): Shared,
+    Path(id): Path<String>,
+    Json(body): Json<ResolveBody>,
+) -> Result<Json<exchangekit_engine::Settlement>, ApiError> {
+    let outcome: Outcome = body.outcome.parse().map_err(bad_request)?;
+    if is_game_market(&id) {
+        return Err(bad_request(format!(
+            "{id} is a game round's market; rounds end on the clock, not by resolution"
+        )));
+    }
+    let mut ex = state.exchange.write().expect("lock");
+    let settlement = ex.resolve_market(&id, outcome, now_ms())?;
+    broadcast(
+        &state,
+        json!({ "type": "resolution", "settlement": serde_json::to_value(&settlement).unwrap() }),
+    );
+    // Both books are empty now; publish them and the new market status.
+    for o in [Outcome::Yes, Outcome::No] {
+        broadcast_book_and_market(&state, &ex, &id, o);
+    }
+    Ok(Json(settlement))
+}
+
+/// The settlement report of an already-resolved market.
+pub async fn get_settlement(
+    State(state): Shared,
+    Path(id): Path<String>,
+) -> Result<Json<exchangekit_engine::Settlement>, ApiError> {
+    let ex = state.exchange.read().expect("lock");
+    if ex.market(&id).is_none() {
+        return Err(not_found(format!("unknown market: {id}")));
+    }
+    ex.settlement(&id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| not_found(format!("market {id} has not resolved")))
 }
 
 #[derive(Deserialize)]

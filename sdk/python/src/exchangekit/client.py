@@ -18,7 +18,18 @@ from typing import Any
 
 import httpx
 
-from .models import Balance, Book, Level, Market, Order, OrderResult, Position, Trade
+from .models import (
+    Balance,
+    Book,
+    Level,
+    Market,
+    Order,
+    OrderResult,
+    Payout,
+    Position,
+    Settlement,
+    Trade,
+)
 
 
 class ExchangeKitError(RuntimeError):
@@ -96,6 +107,27 @@ class Client:
         data = self._request("GET", f"/api/markets/{market}/trades", params={"limit": limit})
         return [Trade.from_dict(t) for t in data]
 
+    # -- settlement --------------------------------------------------------
+
+    def resolve(self, market: str, outcome: str) -> Settlement:
+        """Settle a market: pay 100 cents per winning share, void every
+        resting order, and close the market for good.
+
+        This is an admin operation and the gateway has no authentication,
+        so it is not bound to this client's account. It cannot be undone
+        and a second call raises ``ExchangeKitError`` with status 409.
+        """
+        data = self._request(
+            "POST",
+            f"/api/markets/{market}/resolve",
+            json={"outcome": outcome.upper()},
+        )
+        return Settlement.from_dict(data)
+
+    def settlement(self, market: str) -> Settlement:
+        """The settlement report of an already-resolved market."""
+        return Settlement.from_dict(self._request("GET", f"/api/markets/{market}/settlement"))
+
     # -- orders ------------------------------------------------------------
 
     def place_order(
@@ -163,6 +195,8 @@ __all__ = [
     "Market",
     "Order",
     "OrderResult",
+    "Payout",
     "Position",
+    "Settlement",
     "Trade",
 ]

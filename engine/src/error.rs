@@ -24,4 +24,8 @@ pub enum EngineError {
     OrderNotOpen(u64),
     #[error("order {order} does not belong to account {account}")]
     NotOrderOwner { order: u64, account: String },
+    #[error("market {0} has resolved and no longer trades")]
+    MarketResolved(String),
+    #[error("market {0} has already resolved")]
+    MarketAlreadyResolved(String),
 }

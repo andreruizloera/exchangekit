@@ -9,6 +9,32 @@ export interface MarketSummary {
   yes_price: number | null;
   no_price: number | null;
   volume: number;
+  status: "open" | "resolved";
+  resolved_outcome: OutcomeId | null;
+  resolved_at: number | null;
+  collateral: number;
+}
+
+export interface Payout {
+  account: string;
+  winning_shares: number;
+  losing_shares: number;
+  paid: number;
+}
+
+export interface Settlement {
+  market: string;
+  outcome: OutcomeId;
+  resolved_at: number;
+  payouts: Payout[];
+  total_paid: number;
+  winning_shares: number;
+  losing_shares: number;
+  orders_voided: number;
+  cash_released: number;
+  shares_released: number;
+  collateral: number;
+  unbacked_cash: number;
 }
 
 export interface Level {
@@ -32,7 +58,9 @@ export interface Order {
   price: number;
   quantity: number;
   filled: number;
-  status: "open" | "filled" | "cancelled";
+  // "voided" means the market resolved underneath the order, which is not
+  // the same as its owner cancelling it.
+  status: "open" | "filled" | "cancelled" | "voided";
   created_at: number;
 }
 
@@ -72,6 +100,7 @@ export type WsEvent =
   | { type: "market"; market: MarketSummary }
   | { type: "book"; book: BookView }
   | { type: "trade"; trade: Trade }
+  | { type: "resolution"; settlement: Settlement }
   | { type: "game_over" };
 
 // ---- game ----------------------------------------------------------------

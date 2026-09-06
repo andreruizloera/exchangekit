@@ -11,11 +11,15 @@ mod book;
 mod error;
 mod exchange;
 pub mod game;
+mod settlement;
 mod types;
 
 pub use book::Book;
 pub use error::EngineError;
 pub use exchange::{Account, Exchange, MarketPosition, Position};
+pub use settlement::{
+    compute_payouts, unbacked, Holding, Payout, Resolution, Settlement, SHARE_PAYOUT,
+};
 pub use types::{
     BookView, Cash, Level, Market, Order, OrderId, OrderStatus, Outcome, PlaceResult, Price, Qty,
     Side, Trade, TradeId,

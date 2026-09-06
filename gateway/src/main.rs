@@ -85,6 +85,11 @@ async fn main() {
         .route("/api/markets/{id}", get(handlers::get_market))
         .route("/api/markets/{id}/book", get(handlers::get_book))
         .route("/api/markets/{id}/trades", get(handlers::get_trades))
+        .route(
+            "/api/markets/{id}/settlement",
+            get(handlers::get_settlement),
+        )
+        .route("/api/markets/{id}/resolve", post(handlers::resolve_market))
         .route("/api/orders", post(handlers::place_order))
         .route("/api/orders/{id}", get(handlers::get_order))
         .route("/api/orders/{id}", delete(handlers::cancel_order))

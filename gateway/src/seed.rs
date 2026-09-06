@@ -1,16 +1,28 @@
 //! Demo state: three markets, four play-money accounts, a market maker
 //! providing two-sided liquidity, and a short trade history so the tape
 //! and price estimates are populated on first boot.
+//!
+//! Every share in the seeded exchange is minted as a collateralized
+//! YES/NO pair rather than granted, so each seeded market holds exactly
+//! what it will owe and `POST /api/markets/{id}/resolve` pays out with no
+//! unbacked cash. The game seeds its own one-sided inventory separately;
+//! see `game.rs`.
 
 use exchangekit_engine::{Exchange, Outcome, Side};
 
 use crate::now_ms;
 
 const MIN: u64 = 60_000;
-/// $10,000.00 in play-money cents.
-const USER_CASH: i64 = 1_000_000;
+/// Starting cash per demo user, in play-money cents ($12,000.00). Enough
+/// to cover the pairs each user mints below and still leave $10,000 to
+/// trade with.
+const USER_CASH: i64 = 1_200_000;
 /// The market maker gets deep pockets and deep inventory.
 const MM_CASH: i64 = 100_000_000;
+/// Pairs minted per market: the market maker's book-making inventory, and
+/// a starter position for each demo user so they can sell in the UI.
+const MM_PAIRS: u64 = 100_000;
+const USER_PAIRS: u64 = 500;
 
 struct SeedMarket {
     id: &'static str,
@@ -58,12 +70,12 @@ pub fn seed_exchange() -> Exchange {
 
         // Inventory: the market maker holds deep stock of both outcomes;
         // demo users get a starter position so they can sell in the UI.
-        for outcome in [Outcome::Yes, Outcome::No] {
-            ex.grant_shares("marketmaker", m.id, outcome, 100_000)
-                .expect("mm inventory");
-            for who in ["demo", "alice", "bob"] {
-                ex.grant_shares(who, m.id, outcome, 500).expect("inventory");
-            }
+        // Minting pairs charges 100 cents each and posts them as this
+        // market's collateral, which is what lets it settle fully funded.
+        ex.mint_pair("marketmaker", m.id, MM_PAIRS)
+            .expect("mm inventory");
+        for who in ["demo", "alice", "bob"] {
+            ex.mint_pair(who, m.id, USER_PAIRS).expect("inventory");
         }
 
         let p = m.yes;
@@ -130,5 +142,41 @@ mod tests {
         for who in ["demo", "alice", "bob", "marketmaker"] {
             assert!(ex.account(who).is_some());
         }
+    }
+
+    #[test]
+    fn every_seeded_share_is_backed_by_collateral() {
+        let ex = seed_exchange();
+        let pairs = (MM_PAIRS + 3 * USER_PAIRS) as i64;
+        for m in MARKETS {
+            assert_eq!(
+                ex.collateral(m.id),
+                pairs * 100,
+                "{} holds 100 cents per outstanding pair",
+                m.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_seeded_market_settles_with_no_unbacked_cash() {
+        let mut ex = seed_exchange();
+        let s = ex
+            .resolve_market("mars-2030", Outcome::No, now_ms())
+            .unwrap();
+        assert_eq!(s.unbacked_cash, 0, "seeded shares are all minted as pairs");
+        assert_eq!(s.total_paid, s.collateral);
+        assert!(s.orders_voided > 0, "the seeded ladders were resting");
+    }
+
+    #[test]
+    fn resolving_one_seeded_market_leaves_the_others_trading() {
+        let mut ex = seed_exchange();
+        ex.resolve_market("mars-2030", Outcome::No, now_ms())
+            .unwrap();
+        assert!(ex
+            .place_order("demo", "btc-100k", Outcome::Yes, Side::Buy, 1, 1, now_ms())
+            .is_ok());
+        assert!(ex.collateral("btc-100k") > 0);
     }
 }

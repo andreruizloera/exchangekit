@@ -18,6 +18,33 @@ MARKET = {
     "yes_price": 63,
     "no_price": 37,
     "volume": 105,
+    "status": "open",
+    "resolved_outcome": None,
+    "resolved_at": None,
+    "collateral": 10_150_000,
+}
+
+SETTLEMENT = {
+    "market": "mars-2030",
+    "outcome": "NO",
+    "resolved_at": 1700,
+    "payouts": [
+        {"account": "alice", "winning_shares": 480, "losing_shares": 520, "paid": 48_000},
+        {
+            "account": "marketmaker",
+            "winning_shares": 100_020,
+            "losing_shares": 99_980,
+            "paid": 10_002_000,
+        },
+    ],
+    "total_paid": 10_050_000,
+    "winning_shares": 100_500,
+    "losing_shares": 100_500,
+    "orders_voided": 18,
+    "cash_released": 123_456,
+    "shares_released": 90,
+    "collateral": 10_150_000,
+    "unbacked_cash": 0,
 }
 
 ORDER = {
@@ -78,6 +105,41 @@ def test_market_and_markets_parse() -> None:
     assert market.id == "btc-100k"
     assert market.yes_price == 63
     assert market.volume == 105
+    assert market.status == "open"
+    assert not market.is_resolved
+    assert market.collateral == 10_150_000
+
+
+def test_a_resolved_market_reports_its_winner() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={**MARKET, "status": "resolved", "resolved_outcome": "NO", "resolved_at": 1700},
+        )
+
+    client = make_client(httpx.MockTransport(handler))
+    market = client.market("mars-2030")
+    assert market.is_resolved
+    assert market.resolved_outcome == "NO"
+
+
+def test_market_fields_added_after_v0_1_have_defaults() -> None:
+    """A gateway that predates settlement omits these keys entirely; the
+    client must still parse its markets rather than raising KeyError."""
+    old = {
+        k: v
+        for k, v in MARKET.items()
+        if k not in {"status", "resolved_outcome", "resolved_at", "collateral"}
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=old)
+
+    client = make_client(httpx.MockTransport(handler))
+    market = client.market("btc-100k")
+    assert market.status == "open"
+    assert market.resolved_outcome is None
+    assert market.collateral == 0
 
 
 def test_book_parses_levels() -> None:
@@ -163,6 +225,44 @@ def test_balance_and_positions() -> None:
     assert bal.available == 900
     pos = client.positions()
     assert pos[0].available == 30
+
+
+def test_resolve_sends_the_outcome_and_parses_the_settlement() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/markets/mars-2030/resolve"
+        assert json.loads(request.content) == {"outcome": "NO"}
+        return httpx.Response(200, json=SETTLEMENT)
+
+    client = make_client(httpx.MockTransport(handler))
+    settlement = client.resolve("mars-2030", "no")
+    assert settlement.outcome == "NO"
+    assert settlement.total_paid == 10_050_000
+    assert settlement.unbacked_cash == 0
+    assert settlement.orders_voided == 18
+    assert [p.account for p in settlement.payouts] == ["alice", "marketmaker"]
+    assert settlement.payouts[0].paid == 48_000
+
+
+def test_settlement_reads_an_already_resolved_market() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/markets/mars-2030/settlement"
+        return httpx.Response(200, json=SETTLEMENT)
+
+    client = make_client(httpx.MockTransport(handler))
+    assert client.settlement("mars-2030").winning_shares == 100_500
+
+
+def test_resolving_twice_raises_a_conflict() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"error": "market mars-2030 has already resolved"})
+
+    client = make_client(httpx.MockTransport(handler))
+    with pytest.raises(ExchangeKitError) as exc:
+        client.resolve("mars-2030", "YES")
+    assert exc.value.status_code == 409
+    assert "already resolved" in exc.value.message
 
 
 def test_gateway_errors_raise() -> None:

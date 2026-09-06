@@ -16,6 +16,19 @@ class Market:
     yes_price: int | None
     no_price: int | None
     volume: int
+    #: "open" while the market trades, "resolved" once it has settled.
+    status: str = "open"
+    #: The winning outcome, or None while the market is open. Note that
+    #: yes_price and no_price keep reporting the last traded price after
+    #: resolution; they describe the tape, not the settlement.
+    resolved_outcome: str | None = None
+    resolved_at: int | None = None
+    #: Cents backing the market's outstanding shares, zero once paid out.
+    collateral: int = 0
+
+    @property
+    def is_resolved(self) -> bool:
+        return self.status == "resolved"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Market:
@@ -27,6 +40,10 @@ class Market:
             yes_price=d.get("yes_price"),
             no_price=d.get("no_price"),
             volume=d["volume"],
+            status=d.get("status", "open"),
+            resolved_outcome=d.get("resolved_outcome"),
+            resolved_at=d.get("resolved_at"),
+            collateral=d.get("collateral", 0),
         )
 
 
@@ -146,3 +163,64 @@ class Balance:
     balance: int
     locked: int
     available: int
+
+
+@dataclass(frozen=True)
+class Payout:
+    """What one account received when a market resolved."""
+
+    account: str
+    winning_shares: int
+    losing_shares: int
+    paid: int
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Payout:
+        return cls(
+            account=d["account"],
+            winning_shares=d["winning_shares"],
+            losing_shares=d["losing_shares"],
+            paid=d["paid"],
+        )
+
+
+@dataclass(frozen=True)
+class Settlement:
+    """The report of a resolution: who was paid, what was voided, and
+    whether the payout was funded.
+
+    ``unbacked_cash`` is the part of ``total_paid`` that no collateral
+    stood behind. It is zero when every share was minted as a YES/NO pair
+    and positive when shares were granted for free, which is the engine's
+    way of naming money it created rather than moved.
+    """
+
+    market: str
+    outcome: str
+    resolved_at: int
+    payouts: list[Payout]
+    total_paid: int
+    winning_shares: int
+    losing_shares: int
+    orders_voided: int
+    cash_released: int
+    shares_released: int
+    collateral: int
+    unbacked_cash: int
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Settlement:
+        return cls(
+            market=d["market"],
+            outcome=d["outcome"],
+            resolved_at=d["resolved_at"],
+            payouts=[Payout.from_dict(p) for p in d["payouts"]],
+            total_paid=d["total_paid"],
+            winning_shares=d["winning_shares"],
+            losing_shares=d["losing_shares"],
+            orders_voided=d["orders_voided"],
+            cash_released=d["cash_released"],
+            shares_released=d["shares_released"],
+            collateral=d["collateral"],
+            unbacked_cash=d["unbacked_cash"],
+        )

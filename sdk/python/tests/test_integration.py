@@ -13,7 +13,7 @@ import os
 import httpx
 import pytest
 
-from exchangekit import Client
+from exchangekit import Client, ExchangeKitError
 
 BASE_URL = os.environ.get("EXCHANGEKIT_URL", "http://localhost:8080")
 
@@ -75,3 +75,30 @@ def test_recent_trades_present(client: Client) -> None:
     trades = client.trades("btc-100k", limit=5)
     assert trades, "seeded market has trade history"
     assert all(1 <= t.price <= 99 for t in trades)
+
+
+def test_seeded_market_is_open_and_fully_collateralized(client: Client) -> None:
+    market = client.market("btc-100k")
+    assert market.status == "open"
+    assert not market.is_resolved
+    assert market.resolved_outcome is None
+    # Every seeded share was minted as a pair, so the market holds 100
+    # cents for each outstanding pair and can settle without creating cash.
+    assert market.collateral > 0
+
+
+def test_an_open_market_has_no_settlement_to_read(client: Client) -> None:
+    """These tests deliberately never resolve anything: resolution cannot
+    be undone, and a shared gateway would be left settled for whatever ran
+    next. The live resolve path is exercised by ./demo.sh."""
+    with pytest.raises(ExchangeKitError) as exc:
+        client.settlement("btc-100k")
+    assert exc.value.status_code == 404
+    assert "has not resolved" in exc.value.message
+
+
+def test_resolving_a_game_market_is_refused(client: Client) -> None:
+    with pytest.raises(ExchangeKitError) as exc:
+        client.resolve("game-1", "YES")
+    assert exc.value.status_code == 400
+    assert "game round" in exc.value.message

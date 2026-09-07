@@ -1,3 +1,5 @@
+import type { TradeKind } from "../types";
+
 /** Format cents-per-share as a compact price, e.g. 63 -> "63c". */
 export function formatPrice(cents: number | null): string {
   return cents === null ? "--" : `${cents}c`;
@@ -15,6 +17,22 @@ export function formatCash(cents: number): string {
 /** Format a share quantity with thousands separators. */
 export function formatQty(qty: number): string {
   return qty.toLocaleString("en-US");
+}
+
+/**
+ * Tape label for how a trade's shares were created. An ordinary cross gets
+ * no label, because that is the normal case and labelling it would just be
+ * noise; a complementary cross says which way the pair went.
+ */
+export function tradeKindLabel(kind: TradeKind): string {
+  switch (kind) {
+    case "mint":
+      return "mint";
+    case "burn":
+      return "burn";
+    default:
+      return "";
+  }
 }
 
 /** Format a unix-ms timestamp as local HH:MM:SS. */

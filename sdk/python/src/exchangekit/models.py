@@ -107,6 +107,7 @@ class Order:
 class Trade:
     id: int
     market: str
+    #: The outcome this trade is priced in: the taker's side of it.
     outcome: str
     price: int
     quantity: int
@@ -114,6 +115,19 @@ class Trade:
     buyer: str
     seller: str
     ts: int
+    #: Where the shares came from: "match" for an ordinary cross inside one
+    #: book, "mint" when two buyers on opposite outcomes were crossed and
+    #: the pair was created against collateral, "burn" when two sellers
+    #: were crossed and the pair was destroyed. On a mint the "seller"
+    #: bought the complementary outcome and never held this one; on a burn
+    #: the "buyer" sold the complementary outcome and never received this
+    #: one. A gateway that predates complementary matching omits the field.
+    kind: str = "match"
+
+    @property
+    def is_complementary(self) -> bool:
+        """True when this trade crossed the two books against each other."""
+        return self.kind in ("mint", "burn")
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Trade:
@@ -126,6 +140,7 @@ class Trade:
             taker_side=d["taker_side"],
             buyer=d["buyer"],
             seller=d["seller"],
+            kind=d.get("kind", "match"),
             ts=d["ts"],
         )
 
@@ -163,6 +178,41 @@ class Balance:
     balance: int
     locked: int
     available: int
+
+
+@dataclass(frozen=True)
+class PairResult:
+    """The state of one account in one market after minting or redeeming
+    YES/NO pairs.
+
+    A pair costs 100 cents to mint and returns 100 cents when redeemed,
+    because exactly one of its two shares wins. The cents live in the
+    market's ``collateral`` pool in between.
+    """
+
+    account: str
+    market: str
+    #: Pairs minted or redeemed by the call that returned this.
+    quantity: int
+    balance: int
+    available: int
+    yes: int
+    no: int
+    #: Cents the market holds against its outstanding shares, after the call.
+    collateral: int
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PairResult:
+        return cls(
+            account=d["account"],
+            market=d["market"],
+            quantity=d["quantity"],
+            balance=d["balance"],
+            available=d["available"],
+            yes=d["yes"],
+            no=d["no"],
+            collateral=d["collateral"],
+        )
 
 
 @dataclass(frozen=True)

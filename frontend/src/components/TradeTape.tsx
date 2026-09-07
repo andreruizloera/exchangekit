@@ -1,5 +1,5 @@
 import type { Trade } from "../types";
-import { formatQty, formatTime } from "../lib/format";
+import { formatQty, formatTime, tradeKindLabel } from "../lib/format";
 
 interface Props {
   trades: Trade[];
@@ -20,7 +20,10 @@ export function TradeTape({ trades }: Props) {
         {trades.map((t) => (
           <div key={t.id} className="tape-row">
             <span className="tape-time">{formatTime(t.ts)}</span>
-            <span className={t.outcome === "YES" ? "text-yes" : "text-no"}>{t.outcome}</span>
+            <span className={t.outcome === "YES" ? "text-yes" : "text-no"}>
+              {t.outcome}
+              {tradeKindLabel(t.kind) && <em className="tape-kind">{tradeKindLabel(t.kind)}</em>}
+            </span>
             <span className={t.taker_side === "BUY" ? "text-yes" : "text-no"}>{t.price}c</span>
             <span className="tape-qty">{formatQty(t.quantity)}</span>
           </div>

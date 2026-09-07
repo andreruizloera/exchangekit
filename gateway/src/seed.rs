@@ -169,6 +169,70 @@ mod tests {
         assert!(s.orders_voided > 0, "the seeded ladders were resting");
     }
 
+    /// The seeded ladders are symmetric around the target price, so a YES
+    /// quote and the NO quote at the same step never add up to a dollar in
+    /// the direction that would cross. That is what keeps the demo's
+    /// numbers the same on every fresh gateway now that the two books
+    /// match against each other.
+    #[test]
+    fn the_seeded_books_do_not_cross_each_other() {
+        let ex = seed_exchange();
+        for m in MARKETS {
+            let yes = ex.book_view(m.id, Outcome::Yes, 99).unwrap();
+            let no = ex.book_view(m.id, Outcome::No, 99).unwrap();
+            let top = |levels: &[exchangekit_engine::Level]| levels.first().map(|l| l.price);
+            let (yes_bid, no_bid) = (top(&yes.bids), top(&no.bids));
+            let (yes_ask, no_ask) = (top(&yes.asks), top(&no.asks));
+            assert!(
+                yes_bid.unwrap() + no_bid.unwrap() < 100,
+                "{}: the two best bids would mint a pair",
+                m.id
+            );
+            assert!(
+                yes_ask.unwrap() + no_ask.unwrap() > 100,
+                "{}: the two best asks would burn a pair",
+                m.id
+            );
+        }
+    }
+
+    /// The engine will not release collateral a market does not hold, and
+    /// the seeded markets hold plenty, so a complementary sell there is
+    /// funded rather than skipped.
+    #[test]
+    fn a_seeded_market_can_fund_a_burn() {
+        let mut ex = seed_exchange();
+        let before = ex.collateral("btc-100k");
+        ex.place_order(
+            "demo",
+            "btc-100k",
+            Outcome::Yes,
+            Side::Sell,
+            55,
+            10,
+            now_ms(),
+        )
+        .unwrap();
+        let res = ex
+            .place_order(
+                "alice",
+                "btc-100k",
+                Outcome::No,
+                Side::Sell,
+                30,
+                10,
+                now_ms(),
+            )
+            .unwrap();
+        assert_eq!(res.trades.len(), 1);
+        assert_eq!(
+            res.trades[0].kind,
+            exchangekit_engine::TradeKind::Burn,
+            "55 and 30 leave 15 cents on the table, so the pair is burned"
+        );
+        assert_eq!(ex.collateral("btc-100k"), before - 1_000);
+    }
+
     #[test]
     fn resolving_one_seeded_market_leaves_the_others_trading() {
         let mut ex = seed_exchange();

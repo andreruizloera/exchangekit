@@ -415,14 +415,21 @@ fn cash_and_shares_are_conserved_by_trading() {
     assert_eq!(carol.positions["m"].get(Outcome::Yes).quantity, 1_025);
 }
 
+/// The two books cross each other, but only where the trade makes sense.
+/// A YES ask and a NO bid are the same thing (both offer YES), so they
+/// never trade with one another however the prices line up. The cases that
+/// do cross are two bids or two asks; those live in tests/complementary.rs.
 #[test]
-fn yes_and_no_books_are_independent() {
+fn a_no_bid_never_matches_a_yes_ask_however_the_prices_line_up() {
     let mut ex = setup();
-    sell(&mut ex, "alice", 60, 10); // YES ask
+    sell(&mut ex, "alice", 60, 10); // YES ask, which is a NO bid at 40
     let res = ex
         .place_order("bob", "m", Outcome::No, Side::Buy, 60, 10, T)
         .unwrap();
-    assert!(res.trades.is_empty(), "NO buy must not match a YES ask");
+    assert!(
+        res.trades.is_empty(),
+        "both orders offer YES; there is nobody on the other side"
+    );
     let no_book = ex.book_view("m", Outcome::No, 10).unwrap();
     assert_eq!(no_book.bids[0].price, 60);
     let yes_book = ex.book_view("m", Outcome::Yes, 10).unwrap();

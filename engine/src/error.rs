@@ -20,6 +20,8 @@ pub enum EngineError {
     InsufficientBalance { need: i64, available: i64 },
     #[error("insufficient position: need {need} shares, available {available}")]
     InsufficientPosition { need: i64, available: i64 },
+    #[error("insufficient collateral: need {need} cents, market holds {available}")]
+    InsufficientCollateral { need: i64, available: i64 },
     #[error("order {0} is not open")]
     OrderNotOpen(u64),
     #[error("order {order} does not belong to account {account}")]

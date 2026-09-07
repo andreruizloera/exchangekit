@@ -140,7 +140,7 @@ exchange is also usable on its own, with three seeded prediction markets, a
 seeded market maker, and the full order lifecycle. That is what the Python
 SDK and `./demo.sh` talk to.
 
-`./demo.sh` against a fresh gateway, parts 1 to 4:
+`./demo.sh` against a fresh gateway, the first four parts:
 
 ```
 == markets ==
@@ -192,24 +192,131 @@ Core REST API (the seeded exchange):
 | POST | /api/orders | place a limit order |
 | DELETE | /api/orders/{id}?account=demo | cancel an open order |
 | GET | /api/accounts/{id} | play-money balance |
+| POST | /api/markets/{id}/mint | buy YES/NO pairs at 100c each: `{account, quantity}` |
+| POST | /api/markets/{id}/redeem | sell YES/NO pairs back for 100c each |
 | POST | /api/markets/{id}/resolve | settle the market: `{outcome}` |
 | GET | /api/markets/{id}/settlement | the settlement report of a resolved market |
 | WS | /ws | hello snapshot, then trade, book, market, and resolution events |
 
 The Python SDK wraps the exchange with typed methods: `markets`, `market`,
 `book`, `trades`, `buy`, `sell`, `place_order`, `cancel`, `order`,
-`open_orders`, `positions`, `balance`, `resolve`, `settlement`. See
-[sdk/python](sdk/python). The per-round game markets are hidden from
-`GET /api/markets`, so the SDK and the demo only ever see the seeded
-exchange.
+`open_orders`, `positions`, `balance`, `mint`, `redeem`, `resolve`,
+`settlement`. See [sdk/python](sdk/python). The per-round game markets are
+hidden from `GET /api/markets`, so the SDK and the demo only ever see the
+seeded exchange.
+
+## Complementary matching: one market, two books
+
+A YES share and a NO share of the same market settle for 100 cents between
+them, whichever way it goes. So bidding 63 for YES and bidding 37 for NO
+are the same trade seen from two sides, and the two books of a market are
+one book seen from two directions. A taker takes the best price it can find
+in either of them.
+
+Crossing the complementary book does not move shares between two accounts,
+because the two sides want opposite outcomes. It creates or destroys them:
+
+- **Two buyers cross and the pair is minted.** They pay 63 and 37, which is
+  exactly the 100 cents of collateral one pair needs, so the mint funds
+  itself out of what the two of them paid. Neither had to already hold a
+  share.
+- **Two sellers cross and the pair is burned.** The 100 cents behind it is
+  released and split between them at their prices. Both have to actually
+  hold the share they are selling, and both had it locked against the sell,
+  so the escrow is released in the same step the share is destroyed.
+
+Parts 5 to 7 of `./demo.sh`, on a fresh gateway:
+
+```
+== two bids on opposite outcomes mint a pair ==
+  collateral before:      $101,500.00
+  alice bids 63c for 20 YES
+  order 80: open, filled 0/20
+  bob bids 37c for 20 NO   (63 + 37 = 100, so the pair pays for itself)
+  order 81: filled, filled 20/20
+    trade 14: 20 NO @ 37c  mint
+  collateral after:       $101,520.00
+
+== two asks on opposite outcomes burn one back ==
+  alice offers 20 NO at 37c
+  order 82: open, filled 0/20
+  bob offers 20 YES at 63c (100 - 37, so the pair is worth exactly what they ask)
+  order 83: filled, filled 20/20
+    trade 15: 20 YES @ 63c  burn
+  collateral after:       $101,500.00
+
+== demo redeems 100 pairs for cash ==
+  demo now holds:         440 YES, 400 NO
+  demo balance:           $10,551.30
+  collateral after:       $101,400.00
+  cash plus collateral:   $1,036,000.00 before, $1,036,000.00 after
+```
+
+Six things there are decisions worth naming.
+
+**Priority runs across both books, not within one.** Every fill takes the
+best price available anywhere in the market: the cheapest offer of the
+outcome, whether that is a resting ask on its own book or a resting bid on
+the other. Equal prices go to the older resting order, so a NO bid placed
+before a YES ask at the same effective price fills first. That is ordinary
+price-time priority; the only new part is that "the book" is both of them.
+
+**The mint is self-funding, so no unbacked cash is created.** The taker
+pays its execution price and the maker pays the maker's, and those two
+always sum to 100. The cents that leave the two accounts are exactly the
+cents the collateral pool takes in. Cash plus collateral is unchanged by a
+mint, by a burn, and by a redemption, which is what the last line of the
+demo checks on every run.
+
+**Nothing rounds.** Prices are whole cents from 1 to 99 and a pair is 100 of
+them, so both halves of a complementary cross are exact at every price. A
+cross at 1 and 99 splits as cleanly as one at 50 and 50. There is no lot
+size either: one share is one pair.
+
+**A burn cannot release cents the market does not hold.** Burning draws on
+the market's collateral pool. The engine caps a burn at the number of pairs
+the pool covers and takes the complementary sell side off the table
+entirely when the pool is empty, so the pool never goes negative and a
+seller's order simply rests instead. That matters because `grant_shares`
+creates shares with no collateral behind them; a market full of granted
+shares can be sold into its own book but not burned out of it.
+
+**A trade record gained a field rather than a new shape.** A minted pair has
+two buyers and no seller, which the existing trade record cannot express
+literally. It can express it economically, because buying NO at 37 *is*
+selling YES at 63, so the record names a buyer, a seller, one outcome, and
+one price exactly as it always did. What it could not say is where the
+shares came from, so `Trade` now carries a `kind` of `match`, `mint`, or
+`burn`. On a mint, the account named as the seller bought the complementary
+outcome and never held this one; on a burn, the account named as the buyer
+sold the complementary outcome and never received it. That is the honest
+version: a synthetic house counterparty would have been a lie about who was
+on the other side, and a separate event type would have split the tape in
+two for what is one trade.
+
+**Redeeming is the same primitive without a counterparty.** Holding both
+sides of a binary question is holding a dollar, so
+`POST /api/markets/{id}/redeem` hands the dollar over on demand, out of the
+same pool. `POST /api/markets/{id}/mint` is the inverse and is what the
+seed uses to create every share it hands out. Shares committed to a resting
+sell do not count toward a redemption: cancel the order first.
+
+```python
+client.buy(market="fed-cut-dec", outcome="YES", price=0.44, quantity=5)
+trade = other.buy(market="fed-cut-dec", outcome="NO", price=0.56, quantity=5).trades[0]
+trade.kind, trade.price          # ('mint', 56)
+
+client.mint("fed-cut-dec", 10)   # 10 pairs for $10.00
+client.redeem("fed-cut-dec", 10) # and back again
+```
 
 ## Settling a market
 
 That "settles at 0 or 100 cents" is the whole point of a binary contract, so
 the exchange can do it. Resolving a market pays 100 cents for every share of
 the winning outcome, pays nothing for the other side, voids every resting
-order, and closes the market for good. This is part 5 of `./demo.sh`, run
-against a fresh gateway:
+order, and closes the market for good. This is the last part of
+`./demo.sh`, run against a fresh gateway:
 
 ```
 == mars-2030 before resolution ==
@@ -248,16 +355,20 @@ sell orders.
 **A voided order is not a cancelled one.** Its status is `voided`: the market
 resolved underneath it, which is not something its owner chose.
 
-**Unbacked cash is reported, not hidden.** Trading conserves cash, because a
-buyer's cents become a seller's cents. Settlement is different: it pays
-against shares, and a share only funds itself if it was minted as a YES/NO
-pair against 100 cents of collateral. The seeded exchange mints every share
-that way, which is why the payout above exactly matches the collateral and
-`unbacked cash` reads `$0.00`. The engine also has `grant_shares`, which
-creates shares for free (the game hands out one-sided inventory that way),
-and settling those creates cash out of nothing. The engine does not forbid
-it. It refuses to hide it: the shortfall is computed on every settlement and
-printed with a name.
+**Unbacked cash is reported, not hidden.** Trading conserves cash plus
+collateral: an ordinary cross turns a buyer's cents into a seller's, and a
+mint or a burn moves cents between accounts and the market's pool. Neither
+creates any. Settlement is different: it pays against shares, and a share
+only funds itself if it was minted as a YES/NO pair against 100 cents of
+collateral. The seeded exchange mints every share that way, which is why
+the payout above exactly matches the collateral and `unbacked cash` reads
+`$0.00`. The engine also has `grant_shares`, which creates shares for free
+(the game hands out one-sided inventory that way), and settling those
+creates cash out of nothing. The engine does not forbid it. It refuses to
+hide it: the shortfall is computed on every settlement and printed with a
+name. Complementary matching does not move that number either way, because
+a burn takes one winning share out of circulation for every dollar it takes
+out of the pool.
 
 **Resolution happens once.** A second call is a 409, not a second payout.
 
@@ -319,22 +430,38 @@ cd sdk/python && .venv/bin/pytest # SDK unit tests; integration tests
 
 Engine tests cover the matcher (price and time priority, partial and full
 fills, marketable limits, cancels and escrow, conservation, snapshots),
-settlement (payout arithmetic, voiding and escrow release on both books,
-the closed market, resolving twice, cash conservation across a fully paired
-market, and unbacked cash when shares were granted), and the game logic: the
-seeded PRNG, the fair-value process staying in bounds, each bot strategy's
-core decision from a fixed seed, the Sharpe and drawdown math against known
-equity curves, and tier composition. Frontend tests cover the scorecard grade
-thresholds and the number formatting. CI runs the demo and the SDK
-integration tests against a real gateway, so the output pasted above cannot
-drift from the tool without the build going red.
+complementary matching (minting and burning, which book a taker picks and
+how ties break across the two, price improvement, the collateral cap on a
+burn, redeeming a pair, exactness at every price, and cash plus collateral
+conserved across a mixed session), settlement (payout arithmetic, voiding
+and escrow release on both books, the closed market, resolving twice, cash
+conservation across a fully paired market, and unbacked cash when shares
+were granted), and the game logic: the seeded PRNG, the fair-value process
+staying in bounds, each bot strategy's core decision from a fixed seed, the
+Sharpe and drawdown math against known equity curves, and tier composition.
+Frontend tests cover the scorecard grade thresholds and the number
+formatting. CI runs the demo and the SDK integration tests against a real
+gateway, so the output pasted above cannot drift from the tool without the
+build going red.
 
 ## Limitations
 
 - No shorting: selling requires owning shares, so both you and the bots start
   each round with an inventory to work down. Managing that inventory is part
-  of the game.
-- YES and NO books are independent; the game trades a single side.
+  of the game. Buying the complementary outcome is the closest thing the
+  exchange offers, and it does not need an existing position.
+- A burn needs collateral. Complementary sell orders only cross while the
+  market's pool can cover them, so a market whose shares were granted rather
+  than minted will rest those orders instead of burning. The seeded markets
+  mint everything and never hit this; the game's markets grant everything
+  and always would.
+- A complementary trade is recorded once, in the taker's outcome. The other
+  outcome's last-traded price is not updated by it, so `price_estimate` for
+  that side keeps reporting its own last print or book midpoint.
+- Game rounds do not use it. A round trades one outcome of a throwaway
+  market, so its complementary book is always empty and no round has ever
+  minted or burned a pair. The two pair endpoints refuse game markets for
+  the same reason resolution does.
 - A market resolves to YES or NO and nothing else. There is no void or refund
   outcome, because the engine records what a share is worth at settlement and
   not what anyone paid for it, so it has nothing to refund against.

@@ -232,9 +232,12 @@ fn a_partially_filled_resting_order_releases_only_its_remainder() {
 fn both_books_are_voided_not_only_the_winning_one() {
     let mut ex = setup();
     ex.mint_pair("alice", "m", 20).unwrap();
+    // 70 and 35 sum to more than 100, so these two asks do not cross each
+    // other. Asking less than 100 for a pair would burn it instead of
+    // leaving anything resting to void; see tests/complementary.rs.
     ex.place_order("alice", "m", Outcome::Yes, Side::Sell, 70, 5, T)
         .unwrap();
-    ex.place_order("alice", "m", Outcome::No, Side::Sell, 20, 5, T)
+    ex.place_order("alice", "m", Outcome::No, Side::Sell, 35, 5, T)
         .unwrap();
     let s = ex.resolve_market("m", Outcome::Yes, T).unwrap();
     assert_eq!(s.orders_voided, 2);

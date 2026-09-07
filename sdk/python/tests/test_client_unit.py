@@ -72,7 +72,19 @@ TRADE = {
     "seller": "alice",
     "buy_order": 7,
     "sell_order": 3,
+    "kind": "match",
     "ts": 1000,
+}
+
+PAIR_RESULT = {
+    "account": "demo",
+    "market": "btc-100k",
+    "quantity": 100,
+    "balance": 1_055_130,
+    "available": 1_055_130,
+    "yes": 440,
+    "no": 400,
+    "collateral": 10_140_000,
 }
 
 
@@ -225,6 +237,69 @@ def test_balance_and_positions() -> None:
     assert bal.available == 900
     pos = client.positions()
     assert pos[0].available == 30
+
+
+def test_a_complementary_trade_reports_how_the_shares_were_created() -> None:
+    mint = {**TRADE, "kind": "mint", "outcome": "NO", "price": 37, "seller": "alice"}
+    burn = {**TRADE, "kind": "burn", "outcome": "YES", "price": 63}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[mint, burn, TRADE])
+
+    client = make_client(httpx.MockTransport(handler))
+    trades = client.trades("btc-100k")
+    assert [t.kind for t in trades] == ["mint", "burn", "match"]
+    assert [t.is_complementary for t in trades] == [True, True, False]
+    # The mint still names a buyer and a seller: alice bought the other
+    # outcome, which is the same trade seen from her side.
+    assert trades[0].seller == "alice"
+
+
+def test_a_trade_from_a_gateway_without_complementary_matching_reads_as_a_match() -> None:
+    old = {k: v for k, v in TRADE.items() if k != "kind"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[old])
+
+    client = make_client(httpx.MockTransport(handler))
+    assert client.trades("btc-100k")[0].kind == "match"
+
+
+def test_mint_sends_the_account_and_parses_the_result() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/markets/btc-100k/mint"
+        assert json.loads(request.content) == {"account": "demo", "quantity": 100}
+        return httpx.Response(200, json=PAIR_RESULT)
+
+    client = make_client(httpx.MockTransport(handler))
+    result = client.mint("btc-100k", 100)
+    assert result.quantity == 100
+    assert result.yes == 440
+    assert result.collateral == 10_140_000
+
+
+def test_redeem_hits_the_redeem_path() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/markets/btc-100k/redeem"
+        assert json.loads(request.content)["quantity"] == 25
+        return httpx.Response(200, json={**PAIR_RESULT, "quantity": 25})
+
+    client = make_client(httpx.MockTransport(handler))
+    assert client.redeem("btc-100k", 25).quantity == 25
+
+
+def test_redeeming_more_than_the_market_holds_raises() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400, json={"error": "insufficient collateral: need 100 cents, market holds 0"}
+        )
+
+    client = make_client(httpx.MockTransport(handler))
+    with pytest.raises(ExchangeKitError) as exc:
+        client.redeem("btc-100k", 1)
+    assert exc.value.status_code == 400
+    assert "insufficient collateral" in exc.value.message
 
 
 def test_resolve_sends_the_outcome_and_parses_the_settlement() -> None:

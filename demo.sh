@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Demo: browse markets, read the book, place a marketable buy, show the
-# resulting trade, balance, and position, then settle a market and watch
-# it pay out. Needs a running gateway (docker compose up, or
-# cargo run -p exchangekit-gateway).
+# resulting trade, balance, and position, cross the two books against each
+# other to mint and burn a pair, redeem a pair for cash, then settle a
+# market and watch it pay out. Needs a running gateway (docker compose up,
+# or cargo run -p exchangekit-gateway).
 #
 # Every data line this prints is checked at the end against the output
 # pasted in the README, so the docs cannot drift from the tool without
@@ -72,6 +73,99 @@ for p in json.load(sys.stdin):
     if p["market"] == "btc-100k" and p["outcome"] == "YES":
         print("  position: %d %s shares in %s" % (p["quantity"], p["outcome"], p["market"]))
 ' | say
+
+# ---- complementary matching ----------------------------------------------
+#
+# A YES share and a NO share of one market settle for 100 cents between
+# them, so bidding p for YES is offering NO at 100 - p. The two books
+# therefore trade against each other: two buyers on opposite outcomes
+# cross by minting the pair they are paying for, and two sellers cross by
+# burning the pair they hold. btc-100k is used because its seeded book is
+# tight enough that the only complementary quotes that cross are the ones
+# this section places.
+
+BOOKS="alice bob demo marketmaker"
+
+# Cash held by every seeded account plus every cent sitting in a market's
+# collateral pool. Minting moves cash into a pool and burning moves it back
+# out, so this total is what has to be identical before and after.
+money() {
+    local total=0 who market
+    for who in $BOOKS; do
+        total=$((total + $(get "/api/accounts/$who" | python3 -c 'import json,sys; print(json.load(sys.stdin)["balance"])')))
+    done
+    for market in btc-100k fed-cut-dec mars-2030; do
+        total=$((total + $(get "/api/markets/$market" | python3 -c 'import json,sys; print(json.load(sys.stdin)["collateral"])')))
+    done
+    python3 -c "print('\$' + format($total / 100, ',.2f'))"
+}
+
+order() {
+    curl -fsS -X POST "$BASE/api/orders" -H 'content-type: application/json' \
+        -d "{\"account\":\"$1\",\"market\":\"btc-100k\",\"outcome\":\"$2\",\"side\":\"$3\",\"price\":$4,\"quantity\":$5}"
+}
+
+show_order() {
+    python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+o = r["order"]
+print("  order %d: %s, filled %d/%d" % (o["id"], o["status"], o["filled"], o["quantity"]))
+for t in r["trades"]:
+    print("    trade %d: %d %s @ %dc  %s" % (t["id"], t["quantity"], t["outcome"], t["price"], t["kind"]))
+'
+}
+
+collateral() { get /api/markets/btc-100k | python3 -c 'import json,sys; print("$" + format(json.load(sys.stdin)["collateral"] / 100, ",.2f"))'; }
+
+MONEY_BEFORE=$(money)
+
+echo | say
+echo "== two bids on opposite outcomes mint a pair ==" | say
+echo "  collateral before:      $(collateral)" | say
+echo "  alice bids 63c for 20 YES" | say
+order alice YES BUY 63 20 | show_order | say
+echo "  bob bids 37c for 20 NO   (63 + 37 = 100, so the pair pays for itself)" | say
+order bob NO BUY 37 20 | show_order | say
+echo "  collateral after:       $(collateral)" | say
+
+echo | say
+echo "== two asks on opposite outcomes burn one back ==" | say
+echo "  alice offers 20 NO at 37c" | say
+order alice NO SELL 37 20 | show_order | say
+echo "  bob offers 20 YES at 63c (100 - 37, so the pair is worth exactly what they ask)" | say
+order bob YES SELL 63 20 | show_order | say
+echo "  collateral after:       $(collateral)" | say
+
+# Holding both sides of a binary question is holding a dollar, so the
+# exchange buys the pair back on demand rather than only at settlement.
+# Each run redeems 100 more of demo's pairs, so the number available drops
+# on a gateway this has already run against.
+PAIRS=$(get /api/accounts/demo/positions | python3 -c '
+import json, sys
+held = {p["outcome"]: p["quantity"] - p["locked"] for p in json.load(sys.stdin) if p["market"] == "btc-100k"}
+print(min(100, held.get("YES", 0), held.get("NO", 0)))
+')
+
+echo | say
+echo "== demo redeems $PAIRS pairs for cash ==" | say
+if [ "$PAIRS" -eq 0 ]; then
+    echo "  (demo has no pairs left to redeem. Restart the gateway to run this live.)" | say
+else
+    curl -fsS -X POST "$BASE/api/markets/btc-100k/redeem" \
+        -H 'content-type: application/json' -d "{\"account\":\"demo\",\"quantity\":$PAIRS}" |
+        python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+d = lambda c: "$" + format(c / 100, ",.2f")
+print("  demo now holds:         %d YES, %d NO" % (r["yes"], r["no"]))
+print("  demo balance:           %s" % d(r["balance"]))
+print("  collateral after:       %s" % d(r["collateral"]))
+' | say
+fi
+
+MONEY_AFTER=$(money)
+echo "  cash plus collateral:   $MONEY_BEFORE before, $MONEY_AFTER after" | say
 
 # ---- settlement ----------------------------------------------------------
 #
@@ -154,6 +248,17 @@ echo "  resolve again: $(echo "$AGAIN" | tail -n1) $(echo "$AGAIN" | head -n1 | 
 # it has been run, and is checked on every run.
 
 FAIL=0
+
+# Not a README check: an accounting one. Minting a pair moves cash from two
+# accounts into a market's collateral pool and burning one moves it back,
+# so the two totals have to be identical however much trading happened in
+# between. This runs on every gateway, fresh or not.
+if [ "$MONEY_BEFORE" != "$MONEY_AFTER" ]; then
+    echo "complementary matching changed the money supply:" >&2
+    echo "  $MONEY_BEFORE before, $MONEY_AFTER after" >&2
+    FAIL=1
+fi
+
 check() {
     if ! grep -Fq -- "$1" "$OUT"; then
         echo "demo check failed, this line is in the README but not in the output:" >&2
@@ -176,11 +281,25 @@ if [ "$MARS_STATUS" = "open" ]; then
     check "  trade: 10 YES @ 64c (demo bought from marketmaker)"
     check "  balance \$10,451.30 (available \$10,451.30)"
     check "  position: 540 YES shares in btc-100k"
+    check "  collateral before:      \$101,500.00"
+    check "  order 80: open, filled 0/20"
+    check "  order 81: filled, filled 20/20"
+    check "    trade 14: 20 NO @ 37c  mint"
+    check "  collateral after:       \$101,520.00"
+    check "  order 82: open, filled 0/20"
+    check "  order 83: filled, filled 20/20"
+    check "    trade 15: 20 YES @ 63c  burn"
+    check "== demo redeems 100 pairs for cash =="
+    check "  demo now holds:         440 YES, 400 NO"
+    check "  demo balance:           \$10,551.30"
+    check "  collateral after:       \$101,400.00"
     check "  status:     open"
     check "  collateral: \$101,500.00 backing its outstanding shares"
     check "  demo holds: 556 YES, 500 NO"
 fi
 
+check "20 NO @ 37c  mint"
+check "20 YES @ 63c  burn"
 check "  winner:        NO"
 check "  paid out:      \$101,500.00 to 4 account(s)"
 check "  shares:        101,500 winning, 101,500 losing"

@@ -28,6 +28,17 @@ impl Outcome {
             Outcome::No => "NO",
         }
     }
+
+    /// The other side of the same question. A YES share and a NO share of
+    /// one market always settle for 100 cents between them, whichever way
+    /// the market resolves, which is what lets the two books trade against
+    /// each other.
+    pub fn complement(&self) -> Outcome {
+        match self {
+            Outcome::Yes => Outcome::No,
+            Outcome::No => Outcome::Yes,
+        }
+    }
 }
 
 impl std::str::FromStr for Outcome {
@@ -122,12 +133,49 @@ impl Order {
     }
 }
 
+/// How the shares in a trade came to change hands.
+///
+/// Every trade names a buyer and a seller of one outcome at one price,
+/// because that is what a trade is economically. The kind says where the
+/// shares physically came from, which is not the same question.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradeKind {
+    /// An ordinary cross inside one outcome's own book. The seller handed
+    /// over shares they already held and the buyer received them.
+    #[default]
+    Match,
+    /// A complementary cross between two buyers on opposite outcomes: the
+    /// pair they bought between them was minted against 100 cents of
+    /// collateral, which the two of them funded in full. `seller` is the
+    /// account that bought the complementary outcome, because buying NO
+    /// at `100 - p` is selling YES at `p`. It never held a YES share.
+    Mint,
+    /// A complementary cross between two sellers on opposite outcomes: the
+    /// pair they gave up was burned and 100 cents of collateral released
+    /// to pay them. `buyer` is the account that sold the complementary
+    /// outcome. It never received a share of this one.
+    Burn,
+}
+
+impl TradeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TradeKind::Match => "match",
+            TradeKind::Mint => "mint",
+            TradeKind::Burn => "burn",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
     pub id: TradeId,
     pub market: String,
+    /// The outcome this trade is priced in: the taker's side of it.
     pub outcome: Outcome,
-    /// Execution price in cents (the resting order's price).
+    /// Execution price in cents (the resting order's price, in the frame
+    /// of `outcome`).
     pub price: Price,
     pub quantity: Qty,
     pub taker_side: Side,
@@ -135,6 +183,11 @@ pub struct Trade {
     pub seller: String,
     pub buy_order: OrderId,
     pub sell_order: OrderId,
+    /// Whether the shares came from the seller, from a fresh mint, or were
+    /// burned. Absent from snapshots taken before complementary matching
+    /// existed, which load as [`TradeKind::Match`].
+    #[serde(default)]
+    pub kind: TradeKind,
     /// Unix milliseconds.
     pub ts: u64,
 }

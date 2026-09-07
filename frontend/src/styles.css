@@ -478,6 +478,16 @@ button {
   text-align: right;
 }
 
+/* A complementary cross created or destroyed the pair rather than moving
+   shares between two holders. Worth naming on the tape, quietly. */
+.tape-kind {
+  color: var(--muted);
+  font-style: normal;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  margin-left: 5px;
+}
+
 .text-yes {
   color: var(--yes);
 }

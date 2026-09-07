@@ -7,8 +7,48 @@ use crate::error::EngineError;
 use crate::settlement::{compute_payouts, unbacked, Holding, Resolution, Settlement, SHARE_PAYOUT};
 use crate::types::{
     BookView, Cash, Market, Order, OrderId, OrderStatus, Outcome, PlaceResult, Price, Qty, Side,
-    Trade, TradeId,
+    Trade, TradeId, TradeKind,
 };
+
+/// What a YES share and a NO share of one market are worth together, as a
+/// price rather than a cash amount. Exactly one of the two wins and is paid
+/// [`SHARE_PAYOUT`], so a bid of `p` on one outcome is an offer of
+/// `PAIR_CENTS - p` on the other. Prices are whole cents and so is this, so
+/// the two halves of a complementary cross always add up with nothing left
+/// over to round.
+const PAIR_CENTS: Price = SHARE_PAYOUT as Price;
+
+/// One matchable opportunity for a taker order: a resting order it can
+/// execute against, and at what price.
+#[derive(Debug, Clone, Copy)]
+struct Candidate {
+    /// The resting order on the other side of the fill.
+    maker: OrderId,
+    /// That order's sequence number, which is its time priority.
+    seq: u64,
+    /// Execution price in the taker's outcome frame.
+    taker_price: Price,
+    /// Execution price in the maker's outcome frame. The same number for a
+    /// same-book cross; `PAIR_CENTS - taker_price` for a complementary one,
+    /// which is exactly why a minted pair is self-funding.
+    maker_price: Price,
+    kind: TradeKind,
+}
+
+impl Candidate {
+    /// True if `self` is the better of the two for a taker on `side`.
+    /// Better price wins; equal prices go to the older resting order, so
+    /// price-time priority holds across both books and not just within one.
+    fn beats(&self, other: &Candidate, side: Side) -> bool {
+        if self.taker_price != other.taker_price {
+            return match side {
+                Side::Buy => self.taker_price < other.taker_price,
+                Side::Sell => self.taker_price > other.taker_price,
+            };
+        }
+        self.seq < other.seq
+    }
+}
 
 /// Shares held in one outcome of one market.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
@@ -200,6 +240,61 @@ impl Exchange {
         Ok(())
     }
 
+    /// Redeem `qty` YES/NO pairs out of an account: the account gives up
+    /// one share of each outcome per pair and gets [`SHARE_PAYOUT`] cents
+    /// back, drawn from the market's collateral pool.
+    ///
+    /// This is the exact inverse of [`Exchange::mint_pair`] and it is what
+    /// makes a pair worth 100 cents before resolution rather than only at
+    /// it: holding both sides of a binary question is holding a dollar, so
+    /// the exchange will hand the dollar over on demand.
+    ///
+    /// Shares committed to a resting sell order do not count. Cancel the
+    /// order first, or the redemption would spend a share that is already
+    /// promised to a buyer. The market must also hold the collateral: the
+    /// engine will not release cents it never took in, which is what keeps
+    /// the pool from going negative on a market whose shares were granted
+    /// rather than minted.
+    pub fn redeem_pair(
+        &mut self,
+        account: &str,
+        market: &str,
+        qty: Qty,
+    ) -> Result<(), EngineError> {
+        self.require_open(market)?;
+        if qty == 0 {
+            return Err(EngineError::InvalidQuantity);
+        }
+        let proceeds = SHARE_PAYOUT * qty as Cash;
+        let held = self.collateral(market);
+        if proceeds > held {
+            return Err(EngineError::InsufficientCollateral {
+                need: proceeds,
+                available: held,
+            });
+        }
+        let acct = self
+            .accounts
+            .get_mut(account)
+            .ok_or_else(|| EngineError::UnknownAccount(account.to_string()))?;
+        let pos = acct.positions.entry(market.to_string()).or_default();
+        for outcome in [Outcome::Yes, Outcome::No] {
+            let available = pos.get(outcome).available();
+            if (qty as i64) > available {
+                return Err(EngineError::InsufficientPosition {
+                    need: qty as i64,
+                    available,
+                });
+            }
+        }
+        for outcome in [Outcome::Yes, Outcome::No] {
+            pos.get_mut(outcome).quantity -= qty as i64;
+        }
+        acct.balance += proceeds;
+        *self.collateral.entry(market.to_string()).or_insert(0) -= proceeds;
+        Ok(())
+    }
+
     /// Mint shares into an account for free, with no collateral behind
     /// them. Used for seeding demo liquidity and for the one-sided
     /// inventory a game round hands out.
@@ -234,6 +329,24 @@ impl Exchange {
     /// Submit a limit order. If it crosses resting orders it fills
     /// immediately at the resting prices (a marketable limit order);
     /// any remainder rests in the book at the limit price.
+    ///
+    /// An order can fill against either book. Buying NO at `q` is the same
+    /// trade as selling YES at `PAIR_CENTS - q`, so a resting NO bid is an
+    /// offer of YES and a resting NO ask is a bid for YES. A taker takes
+    /// the best price available across both books, so the two outcomes of
+    /// a market are one order book seen from two directions.
+    ///
+    /// Crossing the complementary book does not move shares between two
+    /// accounts, because the accounts on the two sides want opposite
+    /// outcomes. It creates or destroys them instead:
+    ///
+    /// - Two buyers cross: the pair is minted. They pay `p` and
+    ///   `PAIR_CENTS - p`, which is exactly the collateral one pair needs,
+    ///   so the mint funds itself and no unbacked cash is created.
+    /// - Two sellers cross: the pair is burned and the 100 cents of
+    ///   collateral behind it is released to pay them, again splitting
+    ///   exactly. A burn is only offered while the market's collateral pool
+    ///   can cover it; the engine will not release cents it does not hold.
     #[allow(clippy::too_many_arguments)]
     pub fn place_order(
         &mut self,
@@ -306,50 +419,63 @@ impl Exchange {
 
         let mut trades = Vec::new();
 
-        // Match against the opposite side, best price first, FIFO per level.
+        // Match, best price first across both books, FIFO within a level.
         loop {
             let taker_remaining = self.orders[&taker_id].remaining();
             if taker_remaining == 0 {
                 break;
             }
-            let book = self.books[market].get(outcome);
-            let (level_price, maker_id) = match side {
-                Side::Buy => match book.best_ask() {
-                    Some(best) if best <= price => {
-                        (best, *book.asks[&best].front().expect("nonempty level"))
-                    }
-                    _ => break,
-                },
-                Side::Sell => match book.best_bid() {
-                    Some(best) if best >= price => {
-                        (best, *book.bids[&best].front().expect("nonempty level"))
-                    }
-                    _ => break,
-                },
+            // A burn pays out of the market's collateral pool, so the pool
+            // caps how many pairs one fill may destroy. An empty pool takes
+            // the complementary side off the table rather than lending
+            // against cents the market does not hold.
+            let burn_budget = (self.collateral(market) / SHARE_PAYOUT).max(0) as Qty;
+            let Some(c) = self.best_candidate(market, outcome, side, price, burn_budget) else {
+                break;
             };
 
-            let maker_remaining = self.orders[&maker_id].remaining();
-            let fill = taker_remaining.min(maker_remaining);
+            let mut fill = taker_remaining.min(self.orders[&c.maker].remaining());
+            if c.kind == TradeKind::Burn {
+                fill = fill.min(burn_budget);
+            }
+            debug_assert!(fill > 0, "a candidate that cannot fill must not be offered");
+
+            // The complementary maker is a buyer when the taker is a buyer
+            // and a seller when the taker is a seller, but of the other
+            // outcome; in this outcome's frame that puts it on the opposite
+            // side of the trade, exactly like a same-book maker.
             let (buy_id, sell_id) = match side {
-                Side::Buy => (taker_id, maker_id),
-                Side::Sell => (maker_id, taker_id),
+                Side::Buy => (taker_id, c.maker),
+                Side::Sell => (c.maker, taker_id),
             };
-            self.settle_fill(market, outcome, buy_id, sell_id, level_price, fill);
+            match c.kind {
+                TradeKind::Match => {
+                    self.settle_fill(market, outcome, buy_id, sell_id, c.taker_price, fill)
+                }
+                TradeKind::Mint => self.settle_mint(market, outcome, taker_id, c, fill),
+                TradeKind::Burn => self.settle_burn(market, outcome, taker_id, c, fill),
+            }
 
-            for id in [taker_id, maker_id] {
+            for id in [taker_id, c.maker] {
                 let o = self.orders.get_mut(&id).expect("order exists");
                 o.filled += fill;
                 if o.remaining() == 0 {
                     o.status = OrderStatus::Filled;
                 }
             }
-            if self.orders[&maker_id].remaining() == 0 {
-                let maker_is_bid = side == Side::Sell;
+            if self.orders[&c.maker].remaining() == 0 {
+                let (maker_outcome, maker_is_bid) = match c.kind {
+                    TradeKind::Match => (outcome, side == Side::Sell),
+                    // A complementary maker rests in the other book on the
+                    // same side the taker is on here: two buyers mint, two
+                    // sellers burn.
+                    _ => (outcome.complement(), side == Side::Buy),
+                };
                 self.books
                     .get_mut(market)
                     .expect("market book")
-                    .get_mut(outcome)
-                    .remove(maker_is_bid, level_price, maker_id);
+                    .get_mut(maker_outcome)
+                    .remove(maker_is_bid, c.maker_price, c.maker);
             }
 
             self.next_trade_id += 1;
@@ -357,13 +483,14 @@ impl Exchange {
                 id: self.next_trade_id,
                 market: market.to_string(),
                 outcome,
-                price: level_price,
+                price: c.taker_price,
                 quantity: fill,
                 taker_side: side,
                 buyer: self.orders[&buy_id].account.clone(),
                 seller: self.orders[&sell_id].account.clone(),
                 buy_order: buy_id,
                 sell_order: sell_id,
+                kind: c.kind,
                 ts: now_ms,
             };
             self.trades
@@ -391,6 +518,183 @@ impl Exchange {
             order: self.orders[&taker_id].clone(),
             trades,
         })
+    }
+
+    /// The best fill available to a taker right now, or `None` if nothing
+    /// crosses its limit. Looks at the front of the best level of this
+    /// outcome's own book and at the front of the best complementary level,
+    /// and returns whichever is better on price, older on ties.
+    ///
+    /// `burn_budget` is how many pairs the market's collateral pool can
+    /// afford to destroy. At zero the complementary sell side is not
+    /// offered at all, which also keeps the matching loop terminating: a
+    /// candidate is only returned if it can fill at least one share.
+    fn best_candidate(
+        &self,
+        market: &str,
+        outcome: Outcome,
+        side: Side,
+        limit: Price,
+        burn_budget: Qty,
+    ) -> Option<Candidate> {
+        let books = self.books.get(market)?;
+        let same = books.get(outcome);
+        let other = books.get(outcome.complement());
+        let front = |queue: &std::collections::VecDeque<OrderId>| {
+            let id = *queue.front().expect("levels are never empty");
+            (id, self.orders[&id].seq)
+        };
+
+        let mut best: Option<Candidate> = None;
+        let mut offer = |c: Candidate| {
+            if best.is_none_or(|b| c.beats(&b, side)) {
+                best = Some(c);
+            }
+        };
+
+        match side {
+            Side::Buy => {
+                if let Some(ask) = same.best_ask().filter(|&a| a <= limit) {
+                    let (maker, seq) = front(&same.asks[&ask]);
+                    offer(Candidate {
+                        maker,
+                        seq,
+                        taker_price: ask,
+                        maker_price: ask,
+                        kind: TradeKind::Match,
+                    });
+                }
+                // A resting bid on the other outcome is an offer of this
+                // one: bidding q for NO is offering YES at 100 - q.
+                if let Some(bid) = other
+                    .best_bid()
+                    .filter(|&q| PAIR_CENTS - q <= limit && q < PAIR_CENTS)
+                {
+                    let (maker, seq) = front(&other.bids[&bid]);
+                    offer(Candidate {
+                        maker,
+                        seq,
+                        taker_price: PAIR_CENTS - bid,
+                        maker_price: bid,
+                        kind: TradeKind::Mint,
+                    });
+                }
+            }
+            Side::Sell => {
+                if let Some(bid) = same.best_bid().filter(|&b| b >= limit) {
+                    let (maker, seq) = front(&same.bids[&bid]);
+                    offer(Candidate {
+                        maker,
+                        seq,
+                        taker_price: bid,
+                        maker_price: bid,
+                        kind: TradeKind::Match,
+                    });
+                }
+                // A resting ask on the other outcome is a bid for this one:
+                // offering NO at a is bidding 100 - a for YES.
+                if burn_budget > 0 {
+                    if let Some(ask) = other
+                        .best_ask()
+                        .filter(|&a| a < PAIR_CENTS && PAIR_CENTS - a >= limit)
+                    {
+                        let (maker, seq) = front(&other.asks[&ask]);
+                        offer(Candidate {
+                            maker,
+                            seq,
+                            taker_price: PAIR_CENTS - ask,
+                            maker_price: ask,
+                            kind: TradeKind::Burn,
+                        });
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Cross two buyers on opposite outcomes by minting the pair they are
+    /// paying for between them.
+    ///
+    /// The taker pays its execution price and the maker pays the maker's,
+    /// and those two sum to [`SHARE_PAYOUT`], so the cents that leave the
+    /// two accounts are exactly the cents the collateral pool takes in. No
+    /// cash is created and none is destroyed: it moves from accounts into
+    /// the pool that will pay the winning half of the pair back out.
+    fn settle_mint(
+        &mut self,
+        market: &str,
+        taker_outcome: Outcome,
+        taker_order: OrderId,
+        c: Candidate,
+        qty: Qty,
+    ) {
+        debug_assert_eq!(
+            c.taker_price + c.maker_price,
+            PAIR_CENTS,
+            "the two buyers must fund the whole pair and no more"
+        );
+        for (order, outcome, exec) in [
+            (taker_order, taker_outcome, c.taker_price),
+            (c.maker, taker_outcome.complement(), c.maker_price),
+        ] {
+            // Both sides escrowed cash at their own limit; both pay their
+            // execution price, and any difference goes back to available.
+            let limit = self.orders[&order].price;
+            let who = self.orders[&order].account.clone();
+            let acct = self.accounts.get_mut(&who).expect("buyer account");
+            acct.locked_cash -= limit as Cash * qty as Cash;
+            acct.balance -= exec as Cash * qty as Cash;
+            acct.positions
+                .entry(market.to_string())
+                .or_default()
+                .get_mut(outcome)
+                .quantity += qty as i64;
+        }
+        *self.collateral.entry(market.to_string()).or_insert(0) += SHARE_PAYOUT * qty as Cash;
+    }
+
+    /// Cross two sellers on opposite outcomes by burning the pair they hold
+    /// between them and releasing its collateral to pay them.
+    ///
+    /// Both sides had their shares locked against a resting or incoming
+    /// sell, so the escrow is released and the shares destroyed in the same
+    /// step. The 100 cents that leave the pool are exactly the cents the
+    /// two accounts receive.
+    fn settle_burn(
+        &mut self,
+        market: &str,
+        taker_outcome: Outcome,
+        taker_order: OrderId,
+        c: Candidate,
+        qty: Qty,
+    ) {
+        debug_assert_eq!(
+            c.taker_price + c.maker_price,
+            PAIR_CENTS,
+            "a burned pair pays out exactly what it was collateralized for"
+        );
+        for (order, outcome, exec) in [
+            (taker_order, taker_outcome, c.taker_price),
+            (c.maker, taker_outcome.complement(), c.maker_price),
+        ] {
+            let who = self.orders[&order].account.clone();
+            let acct = self.accounts.get_mut(&who).expect("seller account");
+            acct.balance += exec as Cash * qty as Cash;
+            let pos = acct
+                .positions
+                .entry(market.to_string())
+                .or_default()
+                .get_mut(outcome);
+            pos.locked -= qty as i64;
+            pos.quantity -= qty as i64;
+        }
+        let pool = self.collateral.entry(market.to_string()).or_insert(0);
+        *pool -= SHARE_PAYOUT * qty as Cash;
+        debug_assert!(
+            *pool >= 0,
+            "a burn must never release cents the market does not hold"
+        );
     }
 
     /// Move cash and shares for one fill. Buys were escrowed at their
@@ -759,5 +1063,65 @@ impl Exchange {
 
     pub fn from_snapshot(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(taker_price: Price, seq: u64, kind: TradeKind) -> Candidate {
+        Candidate {
+            maker: seq,
+            seq,
+            taker_price,
+            maker_price: match kind {
+                TradeKind::Match => taker_price,
+                _ => PAIR_CENTS - taker_price,
+            },
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_buyer_prefers_the_cheaper_candidate_from_either_book() {
+        let own = candidate(64, 1, TradeKind::Match);
+        let other = candidate(62, 2, TradeKind::Mint);
+        assert!(other.beats(&own, Side::Buy));
+        assert!(!own.beats(&other, Side::Buy));
+    }
+
+    #[test]
+    fn a_seller_prefers_the_dearer_candidate_from_either_book() {
+        let own = candidate(60, 1, TradeKind::Match);
+        let other = candidate(62, 2, TradeKind::Burn);
+        assert!(other.beats(&own, Side::Sell));
+        assert!(!own.beats(&other, Side::Sell));
+    }
+
+    #[test]
+    fn equal_prices_are_broken_by_time_priority_across_the_books() {
+        let older = candidate(62, 1, TradeKind::Match);
+        let newer = candidate(62, 2, TradeKind::Mint);
+        for side in [Side::Buy, Side::Sell] {
+            assert!(older.beats(&newer, side));
+            assert!(!newer.beats(&older, side));
+        }
+    }
+
+    #[test]
+    fn a_complementary_candidate_always_splits_a_whole_pair() {
+        for p in 1..PAIR_CENTS {
+            let c = candidate(p, 1, TradeKind::Mint);
+            assert_eq!(c.taker_price + c.maker_price, PAIR_CENTS);
+        }
+    }
+
+    #[test]
+    fn an_outcome_is_its_own_complement_twice_over() {
+        for o in [Outcome::Yes, Outcome::No] {
+            assert_ne!(o, o.complement());
+            assert_eq!(o, o.complement().complement());
+        }
     }
 }

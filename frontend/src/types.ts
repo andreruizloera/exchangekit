@@ -64,15 +64,24 @@ export interface Order {
   created_at: number;
 }
 
+// Where the shares in a trade came from. "match" is an ordinary cross
+// inside one outcome's book. "mint" and "burn" are complementary crosses
+// between the two books: on a mint the seller bought the other outcome and
+// never held this one, and on a burn the buyer sold the other outcome and
+// never received this one.
+export type TradeKind = "match" | "mint" | "burn";
+
 export interface Trade {
   id: number;
   market: string;
+  // The outcome the trade is priced in: the taker's side of it.
   outcome: OutcomeId;
   price: number;
   quantity: number;
   taker_side: SideId;
   buyer: string;
   seller: string;
+  kind: TradeKind;
   ts: number;
 }
 

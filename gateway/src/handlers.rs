@@ -5,7 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use exchangekit_engine::{EngineError, Exchange, Outcome, Side};
+use exchangekit_engine::{EngineError, Exchange, Outcome, Side, TradeKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -280,6 +280,94 @@ pub async fn place_order(
         );
     }
     broadcast_book_and_market(&state, &ex, &body.market, outcome);
+    // A complementary cross consumes a resting order in the other book, so
+    // that book has to be republished too or a client watching it would
+    // keep drawing depth that is no longer there.
+    if result.trades.iter().any(|t| t.kind != TradeKind::Match) {
+        broadcast_book_and_market(&state, &ex, &body.market, outcome.complement());
+    }
+    Ok(Json(result))
+}
+
+// ---- pairs ---------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct PairBody {
+    account: String,
+    /// Number of YES/NO pairs.
+    quantity: u64,
+}
+
+/// What an account holds in one market after minting or redeeming.
+#[derive(Serialize)]
+pub struct PairResult {
+    account: String,
+    market: String,
+    /// Pairs minted or redeemed by this call.
+    quantity: u64,
+    balance: i64,
+    available: i64,
+    yes: i64,
+    no: i64,
+    /// Cents the market holds against its outstanding shares, after the call.
+    collateral: i64,
+}
+
+fn pair_result(ex: &Exchange, account: &str, market: &str, quantity: u64) -> PairResult {
+    let acct = ex.account(account).expect("account exists");
+    let pos = acct.positions.get(market).copied().unwrap_or_default();
+    PairResult {
+        account: account.to_string(),
+        market: market.to_string(),
+        quantity,
+        balance: acct.balance,
+        available: acct.available_cash(),
+        yes: pos.get(Outcome::Yes).quantity,
+        no: pos.get(Outcome::No).quantity,
+        collateral: ex.collateral(market),
+    }
+}
+
+/// Game markets are refused for both pair endpoints, the same way
+/// resolution is: a round's inventory is granted one-sided on purpose and
+/// its equity is marked against the YES book alone.
+fn require_not_game(id: &str, what: &str) -> Result<(), ApiError> {
+    if is_game_market(id) {
+        return Err(bad_request(format!(
+            "{id} is a game round's market and does not {what} pairs"
+        )));
+    }
+    Ok(())
+}
+
+/// Buy `quantity` YES/NO pairs at 100 cents each. The cents become the
+/// market's collateral, which is what lets it settle without creating cash.
+pub async fn mint_pair(
+    State(state): Shared,
+    Path(id): Path<String>,
+    Json(body): Json<PairBody>,
+) -> Result<Json<PairResult>, ApiError> {
+    require_not_game(&id, "mint")?;
+    let mut ex = state.exchange.write().expect("lock");
+    ex.mint_pair(&body.account, &id, body.quantity)?;
+    let result = pair_result(&ex, &body.account, &id, body.quantity);
+    broadcast_book_and_market(&state, &ex, &id, Outcome::Yes);
+    Ok(Json(result))
+}
+
+/// Sell `quantity` YES/NO pairs back for 100 cents each, out of the
+/// market's collateral. The inverse of minting, and the reason a pair is
+/// worth a dollar before the market resolves rather than only after.
+pub async fn redeem_pair(
+    State(state): Shared,
+    Path(id): Path<String>,
+    Json(body): Json<PairBody>,
+) -> Result<Json<PairResult>, ApiError> {
+    require_not_game(&id, "redeem")?;
+    let mut ex = state.exchange.write().expect("lock");
+    ex.redeem_pair(&body.account, &id, body.quantity)?;
+    let result = pair_result(&ex, &body.account, &id, body.quantity);
+    broadcast_book_and_market(&state, &ex, &id, Outcome::Yes);
     Ok(Json(result))
 }
 

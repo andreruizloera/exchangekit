@@ -90,6 +90,8 @@ async fn main() {
             get(handlers::get_settlement),
         )
         .route("/api/markets/{id}/resolve", post(handlers::resolve_market))
+        .route("/api/markets/{id}/mint", post(handlers::mint_pair))
+        .route("/api/markets/{id}/redeem", post(handlers::redeem_pair))
         .route("/api/orders", post(handlers::place_order))
         .route("/api/orders/{id}", get(handlers::get_order))
         .route("/api/orders/{id}", delete(handlers::cancel_order))

@@ -22,5 +22,5 @@ pub use settlement::{
 };
 pub use types::{
     BookView, Cash, Level, Market, Order, OrderId, OrderStatus, Outcome, PlaceResult, Price, Qty,
-    Side, Trade, TradeId,
+    Side, Trade, TradeId, TradeKind,
 };

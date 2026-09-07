@@ -28,9 +28,24 @@ def gateway_running() -> bool:
 pytestmark = pytest.mark.skipif(not gateway_running(), reason=f"no gateway at {BASE_URL}")
 
 
+#: Complementary tests use fed-cut-dec, which the other tests leave alone.
+#: Its seeded book quotes YES 43/45 and NO 55/57, so 44 and 56 rest on both
+#: sides and add up to exactly the 100 cents a pair is worth.
+PAIR_MARKET = "fed-cut-dec"
+YES_PRICE = 44
+NO_PRICE = 56
+
+
 @pytest.fixture()
 def client() -> Client:
     with Client(BASE_URL, account="demo") as c:
+        yield c
+
+
+@pytest.fixture()
+def other() -> Client:
+    """A second account, so a complementary cross has two sides."""
+    with Client(BASE_URL, account="alice") as c:
         yield c
 
 
@@ -75,6 +90,66 @@ def test_recent_trades_present(client: Client) -> None:
     trades = client.trades("btc-100k", limit=5)
     assert trades, "seeded market has trade history"
     assert all(1 <= t.price <= 99 for t in trades)
+
+
+def test_complementary_bids_mint_a_pair(client: Client, other: Client) -> None:
+    """Bidding 44 for YES and 56 for NO is the same trade from both sides.
+    Nobody has to already hold a share: the pair is created against the 100
+    cents the two buyers pay between them."""
+    before = client.market(PAIR_MARKET).collateral
+
+    resting = client.buy(market=PAIR_MARKET, outcome="YES", price=YES_PRICE, quantity=5)
+    assert resting.trades == [], "44 is inside the spread, so it rests"
+
+    crossing = other.buy(market=PAIR_MARKET, outcome="NO", price=NO_PRICE, quantity=5)
+    assert len(crossing.trades) == 1
+    trade = crossing.trades[0]
+    assert trade.kind == "mint"
+    assert trade.is_complementary
+    assert trade.outcome == "NO", "priced from the taker's side"
+    assert trade.price == NO_PRICE
+    assert trade.buyer == "alice"
+    assert trade.seller == "demo", "bidding 44 for YES is offering NO at 56"
+    assert client.market(PAIR_MARKET).collateral == before + 5 * 100
+
+
+def test_complementary_asks_burn_a_pair(client: Client, other: Client) -> None:
+    """The other direction: two sellers cross, the pair is destroyed, and
+    the 100 cents behind it is released to pay them."""
+    before = client.market(PAIR_MARKET).collateral
+
+    resting = client.sell(market=PAIR_MARKET, outcome="YES", price=YES_PRICE, quantity=5)
+    assert resting.trades == []
+
+    crossing = other.sell(market=PAIR_MARKET, outcome="NO", price=NO_PRICE, quantity=5)
+    assert len(crossing.trades) == 1
+    trade = crossing.trades[0]
+    assert trade.kind == "burn"
+    assert trade.seller == "alice"
+    assert trade.buyer == "demo", "offering NO at 56 is bidding 44 for YES"
+    assert client.market(PAIR_MARKET).collateral == before - 5 * 100
+
+
+def test_minting_and_redeeming_a_pair_is_a_round_trip(client: Client) -> None:
+    start_cash = client.balance().balance
+    start_collateral = client.market(PAIR_MARKET).collateral
+
+    minted = client.mint(PAIR_MARKET, 10)
+    assert minted.balance == start_cash - 1_000
+    assert minted.collateral == start_collateral + 1_000
+
+    redeemed = client.redeem(PAIR_MARKET, 10)
+    assert redeemed.balance == start_cash
+    assert redeemed.collateral == start_collateral
+    assert redeemed.yes == minted.yes - 10
+    assert redeemed.no == minted.no - 10
+
+
+def test_redeeming_a_game_market_is_refused(client: Client) -> None:
+    with pytest.raises(ExchangeKitError) as exc:
+        client.redeem("game-1", 1)
+    assert exc.value.status_code == 400
+    assert "game round" in exc.value.message
 
 
 def test_seeded_market_is_open_and_fully_collateralized(client: Client) -> None:

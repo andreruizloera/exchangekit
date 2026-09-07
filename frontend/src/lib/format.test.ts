@@ -9,6 +9,7 @@ import {
   formatSharpe,
   formatSignedCash,
   grade,
+  tradeKindLabel,
 } from "./format";
 
 describe("formatPrice", () => {
@@ -58,6 +59,16 @@ describe("formatSharpe", () => {
   it("uses two decimals", () => {
     expect(formatSharpe(1.41421)).toBe("1.41");
     expect(formatSharpe(-0.5)).toBe("-0.50");
+  });
+});
+
+describe("tradeKindLabel", () => {
+  it("names a complementary cross", () => {
+    expect(tradeKindLabel("mint")).toBe("mint");
+    expect(tradeKindLabel("burn")).toBe("burn");
+  });
+  it("leaves an ordinary cross unlabelled", () => {
+    expect(tradeKindLabel("match")).toBe("");
   });
 });
 

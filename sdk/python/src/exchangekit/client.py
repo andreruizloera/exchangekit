@@ -25,6 +25,7 @@ from .models import (
     Market,
     Order,
     OrderResult,
+    PairResult,
     Payout,
     Position,
     Settlement,
@@ -106,6 +107,39 @@ class Client:
     def trades(self, market: str, limit: int = 50) -> list[Trade]:
         data = self._request("GET", f"/api/markets/{market}/trades", params={"limit": limit})
         return [Trade.from_dict(t) for t in data]
+
+    # -- pairs -------------------------------------------------------------
+
+    def mint(self, market: str, quantity: int) -> PairResult:
+        """Buy ``quantity`` YES/NO pairs at 100 cents each.
+
+        The account pays a dollar per pair and receives one share of each
+        outcome; the cents become the market's collateral. This is the
+        funded way to create shares, and it is why a seeded market settles
+        without creating cash.
+        """
+        return PairResult.from_dict(
+            self._request(
+                "POST",
+                f"/api/markets/{market}/mint",
+                json={"account": self.account, "quantity": quantity},
+            )
+        )
+
+    def redeem(self, market: str, quantity: int) -> PairResult:
+        """Sell ``quantity`` YES/NO pairs back for 100 cents each.
+
+        The inverse of :meth:`mint`, and the reason a pair is worth a dollar
+        before the market resolves rather than only after. Shares committed
+        to a resting sell order do not count; cancel the order first.
+        """
+        return PairResult.from_dict(
+            self._request(
+                "POST",
+                f"/api/markets/{market}/redeem",
+                json={"account": self.account, "quantity": quantity},
+            )
+        )
 
     # -- settlement --------------------------------------------------------
 
@@ -195,6 +229,7 @@ __all__ = [
     "Market",
     "Order",
     "OrderResult",
+    "PairResult",
     "Payout",
     "Position",
     "Settlement",

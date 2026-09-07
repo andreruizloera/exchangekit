@@ -11,6 +11,10 @@ readable, and honest about what it does.
 - Keep the engine deterministic and synchronous; concurrency belongs in
   the gateway.
 - Every engine behavior change needs a test in engine/tests/.
+- Anything that moves cash or creates shares must keep cash plus
+  collateral conserved, and needs a test that says so. Minting, burning,
+  and redeeming a pair all move cents between accounts and a market's
+  collateral pool; none of them may change the total.
 
 ## Development setup
 

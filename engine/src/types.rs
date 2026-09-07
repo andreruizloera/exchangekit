@@ -88,6 +88,59 @@ pub enum OrderStatus {
     /// Removed from the book because the market resolved underneath it.
     /// Distinct from `Cancelled`, which is something an account chose.
     Voided,
+    /// Refused by its own terms before it traded or rested: a fill-or-kill
+    /// that could not fill in full, or a post-only that would have taken.
+    /// Distinct from `Cancelled`, which is an order that did exist.
+    Rejected,
+}
+
+/// How long an order may live, and whether it is allowed to take.
+///
+/// The default is the ordinary limit order every other part of this engine
+/// assumes: fill what crosses now, rest the remainder.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeInForce {
+    /// Fill whatever crosses and rest the remainder in the book until it
+    /// fills, is cancelled, or the market resolves.
+    #[default]
+    GoodTillCancelled,
+    /// Fill whatever crosses right now and cancel the rest. Never rests, so
+    /// it never gives anyone else the option of trading against it later.
+    ImmediateOrCancel,
+    /// Fill the whole quantity right now or do nothing at all. Rejected if
+    /// the books cannot supply all of it at the limit price.
+    FillOrKill,
+    /// Never take. Rest in the book, or be rejected if any part of the
+    /// order would have crossed. This is how a maker guarantees it is
+    /// quoting rather than paying the spread.
+    PostOnly,
+}
+
+impl TimeInForce {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TimeInForce::GoodTillCancelled => "gtc",
+            TimeInForce::ImmediateOrCancel => "ioc",
+            TimeInForce::FillOrKill => "fok",
+            TimeInForce::PostOnly => "post_only",
+        }
+    }
+}
+
+impl std::str::FromStr for TimeInForce {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "gtc" | "good_till_cancelled" | "good_til_cancelled" => {
+                Ok(TimeInForce::GoodTillCancelled)
+            }
+            "ioc" | "immediate_or_cancel" => Ok(TimeInForce::ImmediateOrCancel),
+            "fok" | "fill_or_kill" => Ok(TimeInForce::FillOrKill),
+            "post_only" | "postonly" => Ok(TimeInForce::PostOnly),
+            other => Err(format!("unknown time in force: {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +174,10 @@ pub struct Order {
     pub quantity: Qty,
     pub filled: Qty,
     pub status: OrderStatus,
+    /// Absent from snapshots taken before order types existed, which load
+    /// as ordinary limit orders.
+    #[serde(default)]
+    pub time_in_force: TimeInForce,
     /// Monotonic sequence number used for time priority.
     pub seq: u64,
     /// Unix milliseconds.
@@ -130,6 +187,51 @@ pub struct Order {
 impl Order {
     pub fn remaining(&self) -> Qty {
         self.quantity - self.filled
+    }
+}
+
+/// Everything one order submission says. Built by
+/// [`OrderRequest::limit`] and adjusted with [`OrderRequest::tif`].
+#[derive(Debug, Clone, Copy)]
+pub struct OrderRequest<'a> {
+    pub account: &'a str,
+    pub market: &'a str,
+    pub outcome: Outcome,
+    pub side: Side,
+    /// Limit price in cents, 1 to 99.
+    pub price: Price,
+    pub quantity: Qty,
+    pub time_in_force: TimeInForce,
+    /// Unix milliseconds.
+    pub now_ms: u64,
+}
+
+impl<'a> OrderRequest<'a> {
+    /// An ordinary limit order: fill what crosses, rest the remainder.
+    pub fn limit(
+        account: &'a str,
+        market: &'a str,
+        outcome: Outcome,
+        side: Side,
+        price: Price,
+        quantity: Qty,
+        now_ms: u64,
+    ) -> Self {
+        Self {
+            account,
+            market,
+            outcome,
+            side,
+            price,
+            quantity,
+            time_in_force: TimeInForce::default(),
+            now_ms,
+        }
+    }
+
+    pub fn tif(mut self, time_in_force: TimeInForce) -> Self {
+        self.time_in_force = time_in_force;
+        self
     }
 }
 

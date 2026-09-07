@@ -44,6 +44,8 @@ export const api = {
     side: SideId;
     price: number;
     quantity: number;
+    // Omitted means "gtc": fill what crosses, rest the remainder.
+    time_in_force?: "gtc" | "ioc" | "fok" | "post_only";
   }) =>
     request<PlaceResult>("/api/orders", {
       method: "POST",

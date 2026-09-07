@@ -179,8 +179,8 @@ client.buy(market=market.id, outcome="YES", price=0.62, quantity=10)
 Prices are integer cents from 1 to 99. A binary contract settles at 0 or 100
 cents, so buying YES at 63c risks $0.63 to win $1.00 per share. Orders are
 limit orders; a marketable limit order fills immediately against resting
-prices and any remainder rests in the book. Sells require shares; buys escrow
-cash at the limit price.
+prices and any remainder rests in the book, unless its `time_in_force` says
+otherwise. Sells require shares; buys escrow cash at the limit price.
 
 Core REST API (the seeded exchange):
 
@@ -189,7 +189,7 @@ Core REST API (the seeded exchange):
 | GET | /api/markets | list seeded markets with price estimates and volume |
 | GET | /api/markets/{id}/book?outcome=YES&depth=20 | aggregated bids and asks |
 | GET | /api/markets/{id}/trades?limit=50 | recent trades, newest first |
-| POST | /api/orders | place a limit order |
+| POST | /api/orders | place a limit order, optionally with `time_in_force` |
 | DELETE | /api/orders/{id}?account=demo | cancel an open order |
 | GET | /api/accounts/{id} | play-money balance |
 | POST | /api/markets/{id}/mint | buy YES/NO pairs at 100c each: `{account, quantity}` |
@@ -308,6 +308,52 @@ trade.kind, trade.price          # ('mint', 56)
 
 client.mint("fed-cut-dec", 10)   # 10 pairs for $10.00
 client.redeem("fed-cut-dec", 10) # and back again
+```
+
+## Order types
+
+An order can say more than its price. `time_in_force` on `POST /api/orders`
+takes `gtc` (the default), `ioc`, `fok`, or `post_only`, and all three of
+the non-default policies are decided against both books.
+
+| Policy | What it does |
+| --- | --- |
+| `gtc` | Fill what crosses, rest the remainder. The ordinary limit order. |
+| `ioc` | Fill what crosses right now, cancel the rest. Never rests, so it never gives anyone else the option of trading against it later. |
+| `fok` | Fill the whole quantity right now or do nothing at all. |
+| `post_only` | Never take. Rest, or be refused if any part of it would have crossed. |
+
+The last part of `./demo.sh`, before it settles a market:
+
+```
+== order types ==
+  ioc bid at 1c:           cancelled filled 0/5
+  fok for 1,000,000:       rejected  filled 0/1000000
+  post-only at the ask:    rejected  filled 0/5
+  post-only at 1c:         open      filled 0/5
+  resting afterwards:      1 order(s) at 1c
+```
+
+**A refused order is `rejected`, not `cancelled`.** The engine already keeps
+`cancelled` (its owner chose to) apart from `voided` (the market resolved
+underneath it). A fill-or-kill that could not fill and a post-only that
+would have taken are a third thing: their own terms refused them before
+they traded or rested. They come back with status `rejected` and no trades
+rather than as an error, because nothing about the request was malformed.
+They take no escrow and leave both books exactly as they were.
+
+**Both books count.** Whether a post-only order would take, and whether a
+fill-or-kill can fill, are questions about the whole market and not one
+side of it. A YES bid at 63 crosses a resting NO bid at 38, so post-only
+refuses it even with the YES ask sitting at 90. A fill-or-kill counts
+complementary depth toward the quantity it needs, and caps that part at the
+pairs the collateral pool could afford to burn, because a burn it cannot
+fund is depth it cannot reach.
+
+```python
+client.buy(market="btc-100k", outcome="YES", price=0.62, quantity=10, time_in_force="ioc")
+result = client.buy(market="btc-100k", outcome="YES", price=0.62, quantity=10, time_in_force="fok")
+result.order.is_rejected   # True if the books could not cover all ten
 ```
 
 ## Settling a market
@@ -433,7 +479,10 @@ fills, marketable limits, cancels and escrow, conservation, snapshots),
 complementary matching (minting and burning, which book a taker picks and
 how ties break across the two, price improvement, the collateral cap on a
 burn, redeeming a pair, exactness at every price, and cash plus collateral
-conserved across a mixed session), settlement (payout arithmetic, voiding
+conserved across a mixed session), the order types (an immediate-or-cancel
+remainder and its escrow, a fill-or-kill counting both books and the
+collateral cap, a post-only refused for crossing the complementary book,
+and what a rejected order leaves behind), settlement (payout arithmetic, voiding
 and escrow release on both books, the closed market, resolving twice, cash
 conservation across a fully paired market, and unbacked cash when shares
 were granted), and the game logic: the seeded PRNG, the fair-value process

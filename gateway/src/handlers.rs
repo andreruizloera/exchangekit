@@ -5,7 +5,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use exchangekit_engine::{EngineError, Exchange, Outcome, Side, TradeKind};
+use exchangekit_engine::{
+    EngineError, Exchange, OrderRequest, Outcome, Side, TimeInForce, TradeKind,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -255,6 +257,9 @@ pub struct PlaceOrderBody {
     /// Limit price in cents, 1 to 99.
     price: u32,
     quantity: u64,
+    /// "gtc" (the default), "ioc", "fok", or "post_only". The long
+    /// spellings the engine serializes are accepted too.
+    time_in_force: Option<String>,
 }
 
 pub async fn place_order(
@@ -263,15 +268,24 @@ pub async fn place_order(
 ) -> Result<Json<exchangekit_engine::PlaceResult>, ApiError> {
     let outcome: Outcome = body.outcome.parse().map_err(bad_request)?;
     let side: Side = body.side.parse().map_err(bad_request)?;
+    let tif: TimeInForce = body
+        .time_in_force
+        .as_deref()
+        .unwrap_or("gtc")
+        .parse()
+        .map_err(bad_request)?;
     let mut ex = state.exchange.write().expect("lock");
-    let result = ex.place_order(
-        &body.account,
-        &body.market,
-        outcome,
-        side,
-        body.price,
-        body.quantity,
-        now_ms(),
+    let result = ex.place(
+        OrderRequest::limit(
+            &body.account,
+            &body.market,
+            outcome,
+            side,
+            body.price,
+            body.quantity,
+            now_ms(),
+        )
+        .tif(tif),
     )?;
     for trade in &result.trades {
         broadcast(

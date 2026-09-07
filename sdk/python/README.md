@@ -48,6 +48,20 @@ print(client.redeem("fed-cut-dec", 10).collateral)  # and back down
 Shares committed to a resting sell order cannot be redeemed; cancel the
 order first.
 
+`buy`, `sell`, and `place_order` take a `time_in_force` of `"gtc"` (the
+default), `"ioc"`, `"fok"`, or `"post_only"`. A killed or refused order
+comes back with `status == "rejected"` and no trades rather than raising,
+because its terms were honoured. All three are decided against both books,
+so a post-only order that is nowhere near its own ask can still be refused
+for crossing the other one.
+
+```python
+result = client.buy(
+    market="btc-100k", outcome="YES", price=0.62, quantity=10, time_in_force="fok"
+)
+print(result.order.is_rejected)   # True if the books could not cover all ten
+```
+
 A binary contract settles at 0 or 100 cents. `resolve` pays out every
 winning share, voids every resting order, and closes the market; it cannot
 be undone, and a second call raises `ExchangeKitError` with status 409.

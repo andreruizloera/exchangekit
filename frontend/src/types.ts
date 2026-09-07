@@ -49,6 +49,11 @@ export interface BookView {
   asks: Level[];
 }
 
+// What an order asked for beyond its price. The wire form is the long
+// spelling; the API also accepts "gtc", "ioc", "fok", and "post_only".
+export type TimeInForceId =
+  "good_till_cancelled" | "immediate_or_cancel" | "fill_or_kill" | "post_only";
+
 export interface Order {
   id: number;
   account: string;
@@ -59,8 +64,11 @@ export interface Order {
   quantity: number;
   filled: number;
   // "voided" means the market resolved underneath the order, which is not
-  // the same as its owner cancelling it.
-  status: "open" | "filled" | "cancelled" | "voided";
+  // the same as its owner cancelling it. "rejected" means the order's own
+  // terms refused it: a fill-or-kill that could not fill, or a post-only
+  // that would have taken.
+  status: "open" | "filled" | "cancelled" | "voided" | "rejected";
+  time_in_force: TimeInForceId;
   created_at: number;
 }
 

@@ -171,7 +171,22 @@ class Client:
         side: str,
         price: float | int,
         quantity: int,
+        time_in_force: str = "gtc",
     ) -> OrderResult:
+        """Submit a limit order.
+
+        ``time_in_force`` is one of:
+
+        - ``"gtc"``: fill what crosses, rest the remainder. The default.
+        - ``"ioc"``: fill what crosses now, cancel the rest. Never rests.
+        - ``"fok"``: fill the whole quantity now or do nothing.
+        - ``"post_only"``: never take; rest, or be refused.
+
+        A killed or refused order comes back with ``status == "rejected"``
+        and no trades rather than raising: its terms were honoured. All
+        three are decided against both books, so a post-only order that does
+        not cross its own book can still be refused for crossing the other.
+        """
         body = {
             "account": self.account,
             "market": market,
@@ -179,14 +194,29 @@ class Client:
             "side": side.upper(),
             "price": _to_cents(price),
             "quantity": quantity,
+            "time_in_force": time_in_force.lower(),
         }
         return OrderResult.from_dict(self._request("POST", "/api/orders", json=body))
 
-    def buy(self, market: str, outcome: str, price: float | int, quantity: int) -> OrderResult:
-        return self.place_order(market, outcome, "BUY", price, quantity)
+    def buy(
+        self,
+        market: str,
+        outcome: str,
+        price: float | int,
+        quantity: int,
+        time_in_force: str = "gtc",
+    ) -> OrderResult:
+        return self.place_order(market, outcome, "BUY", price, quantity, time_in_force)
 
-    def sell(self, market: str, outcome: str, price: float | int, quantity: int) -> OrderResult:
-        return self.place_order(market, outcome, "SELL", price, quantity)
+    def sell(
+        self,
+        market: str,
+        outcome: str,
+        price: float | int,
+        quantity: int,
+        time_in_force: str = "gtc",
+    ) -> OrderResult:
+        return self.place_order(market, outcome, "SELL", price, quantity, time_in_force)
 
     def order(self, order_id: int) -> Order:
         return Order.from_dict(self._request("GET", f"/api/orders/{order_id}"))

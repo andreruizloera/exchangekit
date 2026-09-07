@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Demo: browse markets, read the book, place a marketable buy, show the
 # resulting trade, balance, and position, cross the two books against each
-# other to mint and burn a pair, redeem a pair for cash, then settle a
-# market and watch it pay out. Needs a running gateway (docker compose up,
-# or cargo run -p exchangekit-gateway).
+# other to mint and burn a pair, redeem a pair for cash, run the three
+# order types, then settle a market and watch it pay out. Needs a running
+# gateway (docker compose up, or cargo run -p exchangekit-gateway).
 #
 # Every data line this prints is checked at the end against the output
 # pasted in the README, so the docs cannot drift from the tool without
@@ -167,6 +167,44 @@ fi
 MONEY_AFTER=$(money)
 echo "  cash plus collateral:   $MONEY_BEFORE before, $MONEY_AFTER after" | say
 
+# ---- order types ---------------------------------------------------------
+#
+# All three of these are decided against both books, so a post-only order
+# that is nowhere near its own ask can still be refused for crossing the
+# other one. Each of these leaves the book exactly as it found it, so the
+# lines below are the same on any gateway.
+
+tif() {
+    curl -fsS -X POST "$BASE/api/orders" -H 'content-type: application/json' \
+        -d "{\"account\":\"demo\",\"market\":\"btc-100k\",\"outcome\":\"$1\",\"side\":\"$2\",\"price\":$3,\"quantity\":$4,\"time_in_force\":\"$5\"}" |
+        python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+o = r["order"]
+print("  %-24s %-9s filled %d/%d" % (sys.argv[1], o["status"], o["filled"], o["quantity"]))
+' "$6"
+}
+
+BEST_ASK=$(get "/api/markets/btc-100k/book?outcome=YES&depth=1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["asks"][0]["price"])')
+
+echo | say
+echo "== order types ==" | say
+tif YES BUY 1 5 ioc "ioc bid at 1c:" | say
+tif YES BUY "$BEST_ASK" 1000000 fok "fok for 1,000,000:" | say
+tif YES BUY "$BEST_ASK" 5 post_only "post-only at the ask:" | say
+tif YES BUY 1 5 post_only "post-only at 1c:" | say
+get /api/accounts/demo/orders | python3 -c '
+import json, sys
+rest = [o for o in json.load(sys.stdin) if o["market"] == "btc-100k"]
+print("  resting afterwards:      %d order(s) at %s" % (len(rest), ", ".join("%dc" % o["price"] for o in rest)))
+' | say
+for oid in $(get /api/accounts/demo/orders | python3 -c '
+import json, sys
+print(" ".join(str(o["id"]) for o in json.load(sys.stdin) if o["market"] == "btc-100k"))
+'); do
+    curl -fsS -X DELETE "$BASE/api/orders/$oid?account=demo" >/dev/null
+done
+
 # ---- settlement ----------------------------------------------------------
 #
 # A binary contract is only worth what it settles for. mars-2030 is the
@@ -300,6 +338,11 @@ fi
 
 check "20 NO @ 37c  mint"
 check "20 YES @ 63c  burn"
+check "  ioc bid at 1c:           cancelled filled 0/5"
+check "  fok for 1,000,000:       rejected  filled 0/1000000"
+check "  post-only at the ask:    rejected  filled 0/5"
+check "  post-only at 1c:         open      filled 0/5"
+check "  resting afterwards:      1 order(s) at 1c"
 check "  winner:        NO"
 check "  paid out:      \$101,500.00 to 4 account(s)"
 check "  shares:        101,500 winning, 101,500 losing"

@@ -86,6 +86,54 @@ def test_resting_order_and_cancel(client: Client) -> None:
     assert all(o.id != result.order.id for o in client.open_orders())
 
 
+def test_an_ioc_order_never_rests(client: Client) -> None:
+    # A 1 cent bid crosses nothing on the seeded book, so an ordinary limit
+    # order would rest here and an immediate-or-cancel one must not.
+    result = client.buy(
+        market="btc-100k", outcome="YES", price=0.01, quantity=1, time_in_force="ioc"
+    )
+    assert result.trades == []
+    assert result.order.status == "cancelled"
+    assert result.order.time_in_force == "immediate_or_cancel"
+    assert all(o.id != result.order.id for o in client.open_orders())
+
+
+def test_a_fill_or_kill_beyond_the_books_is_rejected(client: Client) -> None:
+    """The seeded market has real depth but not a million shares of it, so
+    this one is killed. Nothing is escrowed and nothing rests."""
+    before = client.balance()
+    result = client.buy(
+        market="btc-100k", outcome="YES", price=0.99, quantity=1_000_000, time_in_force="fok"
+    )
+    assert result.order.is_rejected
+    assert result.trades == []
+    assert client.balance() == before, "a killed order takes no escrow"
+    assert all(o.id != result.order.id for o in client.open_orders())
+
+
+def test_a_post_only_order_is_refused_rather_than_taking(client: Client) -> None:
+    book = client.book("btc-100k", outcome="YES")
+    ask = book.asks[0].price
+    taking = client.buy(
+        market="btc-100k", outcome="YES", price=ask, quantity=1, time_in_force="post_only"
+    )
+    assert taking.order.is_rejected
+    assert taking.trades == []
+
+    quoting = client.buy(
+        market="btc-100k", outcome="YES", price=0.01, quantity=1, time_in_force="post_only"
+    )
+    assert quoting.order.status == "open"
+    client.cancel(quoting.order.id)
+
+
+def test_an_unknown_time_in_force_is_a_bad_request(client: Client) -> None:
+    with pytest.raises(ExchangeKitError) as exc:
+        client.buy(market="btc-100k", outcome="YES", price=0.01, quantity=1, time_in_force="asap")
+    assert exc.value.status_code == 400
+    assert "time in force" in exc.value.message
+
+
 def test_recent_trades_present(client: Client) -> None:
     trades = client.trades("btc-100k", limit=5)
     assert trades, "seeded market has trade history"

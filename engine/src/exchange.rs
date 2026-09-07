@@ -6,8 +6,8 @@ use crate::book::Book;
 use crate::error::EngineError;
 use crate::settlement::{compute_payouts, unbacked, Holding, Resolution, Settlement, SHARE_PAYOUT};
 use crate::types::{
-    BookView, Cash, Market, Order, OrderId, OrderStatus, Outcome, PlaceResult, Price, Qty, Side,
-    Trade, TradeId, TradeKind,
+    BookView, Cash, Market, Order, OrderId, OrderRequest, OrderStatus, Outcome, PlaceResult, Price,
+    Qty, Side, TimeInForce, Trade, TradeId, TradeKind,
 };
 
 /// What a YES share and a NO share of one market are worth together, as a
@@ -358,6 +358,42 @@ impl Exchange {
         quantity: Qty,
         now_ms: u64,
     ) -> Result<PlaceResult, EngineError> {
+        self.place(OrderRequest::limit(
+            account, market, outcome, side, price, quantity, now_ms,
+        ))
+    }
+
+    /// Submit an order with a [`TimeInForce`] other than the default.
+    /// [`Exchange::place_order`] is this with an ordinary limit order.
+    ///
+    /// The three non-default policies are all decided before any state
+    /// moves, so a refused order takes no escrow and leaves no trace in
+    /// either book:
+    ///
+    /// - `FillOrKill` asks the books how much they could supply at the
+    ///   limit, counting both of them and the pairs the collateral pool
+    ///   could afford to burn, and refuses unless that covers the whole
+    ///   quantity.
+    /// - `PostOnly` refuses if anything would cross, in either book. A
+    ///   maker quoting 63 for YES is offering NO at 37, so an order that
+    ///   does not cross its own book can still be taking.
+    /// - `ImmediateOrCancel` matches normally and then cancels its
+    ///   remainder instead of resting, releasing that remainder's escrow.
+    ///
+    /// A killed or refused order comes back with status
+    /// [`OrderStatus::Rejected`] rather than an error: its terms were
+    /// honoured, and nothing about the request was malformed.
+    pub fn place(&mut self, req: OrderRequest<'_>) -> Result<PlaceResult, EngineError> {
+        let OrderRequest {
+            account,
+            market,
+            outcome,
+            side,
+            price,
+            quantity,
+            time_in_force,
+            now_ms,
+        } = req;
         if !(1..=99).contains(&price) {
             return Err(EngineError::InvalidPrice(price));
         }
@@ -365,6 +401,46 @@ impl Exchange {
             return Err(EngineError::InvalidQuantity);
         }
         self.require_open(market)?;
+        if !self.accounts.contains_key(account) {
+            return Err(EngineError::UnknownAccount(account.to_string()));
+        }
+
+        // Decide the refusing policies first, while nothing has moved. A
+        // rejected order still gets an id and a record, so a caller can ask
+        // what happened to it, but it never touches escrow or a book.
+        let refuse = match time_in_force {
+            TimeInForce::FillOrKill => self.fillable(market, outcome, side, price) < quantity,
+            TimeInForce::PostOnly => self
+                .best_candidate(market, outcome, side, price, self.burn_budget(market))
+                .is_some(),
+            _ => false,
+        };
+        if refuse {
+            self.next_order_id += 1;
+            self.next_seq += 1;
+            let id = self.next_order_id;
+            self.orders.insert(
+                id,
+                Order {
+                    id,
+                    account: account.to_string(),
+                    market: market.to_string(),
+                    outcome,
+                    side,
+                    price,
+                    quantity,
+                    filled: 0,
+                    status: OrderStatus::Rejected,
+                    time_in_force,
+                    seq: self.next_seq,
+                    created_at: now_ms,
+                },
+            );
+            return Ok(PlaceResult {
+                order: self.orders[&id].clone(),
+                trades: Vec::new(),
+            });
+        }
 
         // Escrow: buys lock cash at the limit price, sells lock shares.
         {
@@ -412,6 +488,7 @@ impl Exchange {
             quantity,
             filled: 0,
             status: OrderStatus::Open,
+            time_in_force,
             seq: self.next_seq,
             created_at: now_ms,
         };
@@ -429,7 +506,7 @@ impl Exchange {
             // caps how many pairs one fill may destroy. An empty pool takes
             // the complementary side off the table rather than lending
             // against cents the market does not hold.
-            let burn_budget = (self.collateral(market) / SHARE_PAYOUT).max(0) as Qty;
+            let burn_budget = self.burn_budget(market);
             let Some(c) = self.best_candidate(market, outcome, side, price, burn_budget) else {
                 break;
             };
@@ -500,17 +577,36 @@ impl Exchange {
             trades.push(trade);
         }
 
-        // Rest any remainder in the book at the limit price.
+        // Rest any remainder in the book at the limit price, unless the
+        // order said not to. An immediate-or-cancel remainder is cancelled
+        // here and its escrow released, which is the whole point of the
+        // policy: it is never available to anyone else.
         let remaining = self.orders[&taker_id].remaining();
         if remaining > 0 {
-            let book = self
-                .books
-                .get_mut(market)
-                .expect("market book")
-                .get_mut(outcome);
-            match side {
-                Side::Buy => book.add_bid(price, taker_id),
-                Side::Sell => book.add_ask(price, taker_id),
+            if time_in_force == TimeInForce::ImmediateOrCancel {
+                let acct = self.accounts.get_mut(account).expect("account exists");
+                match side {
+                    Side::Buy => acct.locked_cash -= price as Cash * remaining as Cash,
+                    Side::Sell => {
+                        acct.positions
+                            .entry(market.to_string())
+                            .or_default()
+                            .get_mut(outcome)
+                            .locked -= remaining as i64;
+                    }
+                }
+                self.orders.get_mut(&taker_id).expect("order exists").status =
+                    OrderStatus::Cancelled;
+            } else {
+                let book = self
+                    .books
+                    .get_mut(market)
+                    .expect("market book")
+                    .get_mut(outcome);
+                match side {
+                    Side::Buy => book.add_bid(price, taker_id),
+                    Side::Sell => book.add_ask(price, taker_id),
+                }
             }
         }
 
@@ -518,6 +614,58 @@ impl Exchange {
             order: self.orders[&taker_id].clone(),
             trades,
         })
+    }
+
+    /// How many pairs a market's collateral pool could afford to burn.
+    fn burn_budget(&self, market: &str) -> Qty {
+        (self.collateral(market) / SHARE_PAYOUT).max(0) as Qty
+    }
+
+    /// How much of a taker order at `limit` the books could fill right now,
+    /// across both of them. Fill-or-kill has to know this before it takes
+    /// any escrow, and the total does not depend on the order the levels
+    /// would be taken in, so this sums rather than simulating the walk.
+    fn fillable(&self, market: &str, outcome: Outcome, side: Side, limit: Price) -> Qty {
+        let Some(books) = self.books.get(market) else {
+            return 0;
+        };
+        let same = books.get(outcome);
+        let other = books.get(outcome.complement());
+        let depth = |queue: &std::collections::VecDeque<OrderId>| -> Qty {
+            queue.iter().map(|&id| self.orders[&id].remaining()).sum()
+        };
+        match side {
+            Side::Buy => {
+                // Asks at or below the limit, plus complementary bids high
+                // enough that the pair they offer costs no more.
+                let own: Qty = same
+                    .asks
+                    .range(..=limit)
+                    .map(|(_, queue)| depth(queue))
+                    .sum();
+                let cross: Qty = other
+                    .bids
+                    .range(PAIR_CENTS.saturating_sub(limit)..)
+                    .map(|(_, queue)| depth(queue))
+                    .sum();
+                own + cross
+            }
+            Side::Sell => {
+                let own: Qty = same
+                    .bids
+                    .range(limit..)
+                    .map(|(_, queue)| depth(queue))
+                    .sum();
+                // Burning is capped by what the pool can release, so the
+                // complementary side may be worth less than it looks.
+                let cross: Qty = other
+                    .asks
+                    .range(..=PAIR_CENTS.saturating_sub(limit))
+                    .map(|(_, queue)| depth(queue))
+                    .sum();
+                own + cross.min(self.burn_budget(market))
+            }
+        }
     }
 
     /// The best fill available to a taker right now, or `None` if nothing

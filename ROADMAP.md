@@ -47,9 +47,13 @@ Honest future work. None of this is implemented yet.
 
 ## Exchange features
 
-- Order types: market orders as a first-class type, immediate-or-cancel,
-  fill-or-kill, post-only.
-- Self-trade prevention policies (cancel-newest, cancel-oldest).
+- Market orders as a first-class type. Today a taker writes a limit at 99
+  or 1 and gets the same behavior, but an explicit market order would need
+  a rule for an empty or thin book, which is a decision and not just a
+  keyword.
+- Self-trade prevention policies (cancel-newest, cancel-oldest). One
+  account can currently cross itself, including complementarily, where it
+  is just an expensive way to mint or redeem a pair.
 - Per-account order and message rate limits.
 - Fees (maker/taker) to make simulations more realistic.
 - PostgreSQL persistence as an alternative to JSON snapshots, with an

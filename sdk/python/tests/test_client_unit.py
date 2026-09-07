@@ -57,6 +57,7 @@ ORDER = {
     "quantity": 10,
     "filled": 4,
     "status": "open",
+    "time_in_force": "good_till_cancelled",
     "seq": 7,
     "created_at": 1000,
 }
@@ -187,6 +188,7 @@ def test_buy_sends_correct_body_and_parses_result() -> None:
             "side": "BUY",
             "price": 62,
             "quantity": 10,
+            "time_in_force": "gtc",
         }
         return httpx.Response(200, json={"order": ORDER, "trades": [TRADE]})
 
@@ -207,6 +209,65 @@ def test_sell_uses_sell_side() -> None:
     client = make_client(httpx.MockTransport(handler))
     result = client.sell(market="btc-100k", outcome="yes", price=70, quantity=5)
     assert result.trades == []
+
+
+def test_a_time_in_force_is_sent_and_parsed_back() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["time_in_force"] == "ioc"
+        return httpx.Response(
+            200,
+            json={
+                "order": {
+                    **ORDER,
+                    "status": "cancelled",
+                    "time_in_force": "immediate_or_cancel",
+                },
+                "trades": [TRADE],
+            },
+        )
+
+    client = make_client(httpx.MockTransport(handler))
+    result = client.buy(
+        market="btc-100k", outcome="YES", price=0.62, quantity=10, time_in_force="IOC"
+    )
+    assert result.order.time_in_force == "immediate_or_cancel"
+    assert result.order.status == "cancelled"
+    assert not result.order.is_rejected
+
+
+def test_a_killed_order_comes_back_rejected_rather_than_raising() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["time_in_force"] == "fok"
+        return httpx.Response(
+            200,
+            json={
+                "order": {
+                    **ORDER,
+                    "filled": 0,
+                    "status": "rejected",
+                    "time_in_force": "fill_or_kill",
+                },
+                "trades": [],
+            },
+        )
+
+    client = make_client(httpx.MockTransport(handler))
+    result = client.buy(
+        market="btc-100k", outcome="YES", price=0.62, quantity=10, time_in_force="fok"
+    )
+    assert result.order.is_rejected
+    assert result.trades == []
+    assert result.order.remaining == 10
+
+
+def test_an_order_from_a_gateway_without_order_types_reads_as_gtc() -> None:
+    old = {k: v for k, v in ORDER.items() if k != "time_in_force"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=old)
+
+    client = make_client(httpx.MockTransport(handler))
+    assert client.order(7).time_in_force == "good_till_cancelled"
 
 
 def test_cancel_passes_account() -> None:

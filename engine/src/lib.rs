@@ -21,6 +21,6 @@ pub use settlement::{
     compute_payouts, unbacked, Holding, Payout, Resolution, Settlement, SHARE_PAYOUT,
 };
 pub use types::{
-    BookView, Cash, Level, Market, Order, OrderId, OrderStatus, Outcome, PlaceResult, Price, Qty,
-    Side, Trade, TradeId, TradeKind,
+    BookView, Cash, Level, Market, Order, OrderId, OrderRequest, OrderStatus, Outcome, PlaceResult,
+    Price, Qty, Side, TimeInForce, Trade, TradeId, TradeKind,
 };

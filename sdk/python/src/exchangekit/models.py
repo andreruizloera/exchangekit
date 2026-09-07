@@ -80,12 +80,23 @@ class Order:
     price: int
     quantity: int
     filled: int
+    #: "open", "filled", "cancelled", "voided" (the market resolved
+    #: underneath it), or "rejected" (its own terms refused it: a
+    #: fill-or-kill that could not fill, or a post-only that would take).
     status: str
     created_at: int
+    #: "good_till_cancelled" (the default), "immediate_or_cancel",
+    #: "fill_or_kill", or "post_only". A gateway that predates order types
+    #: omits the field.
+    time_in_force: str = "good_till_cancelled"
 
     @property
     def remaining(self) -> int:
         return self.quantity - self.filled
+
+    @property
+    def is_rejected(self) -> bool:
+        return self.status == "rejected"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Order:
@@ -100,6 +111,7 @@ class Order:
             filled=d["filled"],
             status=d["status"],
             created_at=d["created_at"],
+            time_in_force=d.get("time_in_force", "good_till_cancelled"),
         )
 
 
